@@ -36,7 +36,7 @@ export async function probeHardware(): Promise<HardwareProbeResult> {
     
     // Attempting to push limits for high-tier hardware
     // Standard limits are 256MB/128MB. We probe for what the hardware CAN do.
-    const limitsToProbe = [
+    const limitsToProbe: (keyof GPUSupportedLimits)[] = [
       'maxBufferSize',
       'maxStorageBufferBindingSize',
       'maxComputeWorkgroupStorageSize',
@@ -44,7 +44,7 @@ export async function probeHardware(): Promise<HardwareProbeResult> {
 
     for (const limit of limitsToProbe) {
       if (limit in adapter.limits) {
-        requiredLimits[limit] = (adapter.limits as any)[limit];
+        requiredLimits[limit] = adapter.limits[limit];
       }
     }
 
