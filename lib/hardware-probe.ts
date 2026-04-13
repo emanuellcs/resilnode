@@ -1,0 +1,82 @@
+export type DeviceTier = 'TIER_1_EDGE' | 'TIER_4_COMMAND';
+
+export interface HardwareProbeResult {
+  tier: DeviceTier;
+  adapterInfo: GPUAdapterInfo | null;
+  maxBufferSize: number;
+  maxStorageBufferBindingSize: number;
+  gpuSupported: boolean;
+  error?: string;
+}
+
+/**
+ * Probes the host device for WebGPU capabilities and requests massive buffer limits.
+ * Deterministically classifies hardware for Gemma 4 deployment.
+ */
+export async function probeHardware(): Promise<HardwareProbeResult> {
+  if (!navigator.gpu) {
+    return {
+      tier: 'TIER_1_EDGE',
+      adapterInfo: null,
+      maxBufferSize: 0,
+      maxStorageBufferBindingSize: 0,
+      gpuSupported: false,
+      error: 'WebGPU not supported in this environment.',
+    };
+  }
+
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      throw new Error('No appropriate GPU adapter found.');
+    }
+
+    // Attempt to request maximal buffer limits to bypass browser defaults
+    const requiredLimits: Record<string, number> = {};
+    
+    // Attempting to push limits for high-tier hardware
+    // Standard limits are 256MB/128MB. We probe for what the hardware CAN do.
+    const limitsToProbe = [
+      'maxBufferSize',
+      'maxStorageBufferBindingSize',
+      'maxComputeWorkgroupStorageSize',
+    ];
+
+    for (const limit of limitsToProbe) {
+      if (limit in adapter.limits) {
+        requiredLimits[limit] = (adapter.limits as any)[limit];
+      }
+    }
+
+    const device = await adapter.requestDevice({
+      requiredLimits,
+    });
+
+    const info = await adapter.requestAdapterInfo?.() || null;
+    
+    const maxBufferSize = device.limits.maxBufferSize;
+    const maxStorageBufferBindingSize = device.limits.maxStorageBufferBindingSize;
+
+    // Classification Logic:
+    // TIER_4_COMMAND requires significant storage buffer binding (typically > 1GB for MoE)
+    // and ideally a discrete GPU (not strictly checkable but we can infer from limits).
+    const isHighTier = maxStorageBufferBindingSize >= 1024 * 1024 * 1024; // >= 1GB as threshold
+
+    return {
+      tier: isHighTier ? 'TIER_4_COMMAND' : 'TIER_1_EDGE',
+      adapterInfo: info,
+      maxBufferSize,
+      maxStorageBufferBindingSize,
+      gpuSupported: true,
+    };
+  } catch (error) {
+    return {
+      tier: 'TIER_1_EDGE',
+      adapterInfo: null,
+      maxBufferSize: 0,
+      maxStorageBufferBindingSize: 0,
+      gpuSupported: false,
+      error: error instanceof Error ? error.message : 'Unknown hardware probing error.',
+    };
+  }
+}

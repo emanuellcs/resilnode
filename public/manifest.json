@@ -1,0 +1,16 @@
+{
+  "name": "ResilNode",
+  "short_name": "ResilNode",
+  "description": "Zero-server, hardware-agnostic PWA for disaster response.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [
+    {
+      "src": "/window.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
