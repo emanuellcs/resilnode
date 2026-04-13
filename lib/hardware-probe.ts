@@ -43,8 +43,9 @@ export async function probeHardware(): Promise<HardwareProbeResult> {
     ];
 
     for (const limit of limitsToProbe) {
-      if (limit in adapter.limits) {
-        requiredLimits[limit] = adapter.limits[limit];
+      const val = adapter.limits[limit];
+      if (val !== undefined) {
+        requiredLimits[limit] = val as number;
       }
     }
 
@@ -52,7 +53,7 @@ export async function probeHardware(): Promise<HardwareProbeResult> {
       requiredLimits,
     });
 
-    const info = await adapter.requestAdapterInfo?.() || null;
+    const info = (adapter as any).info || (await (adapter as any).requestAdapterInfo?.()) || null;
     
     const maxBufferSize = device.limits.maxBufferSize;
     const maxStorageBufferBindingSize = device.limits.maxStorageBufferBindingSize;

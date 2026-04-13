@@ -53,7 +53,7 @@ export class TriageOrchestrator {
     if (this.tier === 'TIER_1_EDGE' && isComplex) {
       escalated = true;
       const payload = {
-        type: 'ESCALATION_QUERY',
+        type: 'ESCALATION_QUERY' as const,
         data: { detections, userPrompt: audioTranscript },
         timestamp: Date.now()
       };

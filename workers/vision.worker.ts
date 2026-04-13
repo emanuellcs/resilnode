@@ -37,7 +37,7 @@ self.onmessage = async (event) => {
   if (type === 'PROCESS_IMAGE' && visionPipeline) {
     try {
       // payload is an ImageBitmap or Blob
-      const result = await visionPipeline(payload);
+      const result = await (visionPipeline as any)(payload);
       self.postMessage({ type: 'RESULT', payload: result });
     } catch (error) {
       self.postMessage({ type: 'ERROR', message: `Vision Processing Error: ${error instanceof Error ? error.message : 'Unknown error'}` });

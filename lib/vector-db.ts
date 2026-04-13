@@ -29,10 +29,12 @@ export function cosineSimilarity(vecA: number[] | Float32Array, vecB: number[] |
 }
 
 export class VectorStore {
-  private dbPromise: Promise<IDBPDatabase>;
+  private dbPromise: Promise<IDBPDatabase> | null = null;
 
   constructor() {
-    this.dbPromise = this.initialize();
+    if (typeof window !== 'undefined') {
+      this.dbPromise = this.initialize();
+    }
   }
 
   private async initialize(): Promise<IDBPDatabase> {
@@ -46,6 +48,7 @@ export class VectorStore {
   }
 
   async addDocument(text: string, embedding: number[] | Float32Array): Promise<number> {
+    if (!this.dbPromise) throw new Error('VectorStore not initialized on client.');
     const db = await this.dbPromise;
     // Ensure it's a standard array for IndexedDB compatibility
     const embeddingArray = embedding instanceof Float32Array ? Array.from(embedding) : embedding;
@@ -53,10 +56,11 @@ export class VectorStore {
     return db.add(STORE_NAME, {
       text,
       embedding: embeddingArray,
-    });
+    }) as Promise<number>;
   }
 
   async getDocumentCount(): Promise<number> {
+    if (!this.dbPromise) return 0;
     const db = await this.dbPromise;
     return db.count(STORE_NAME);
   }
@@ -66,6 +70,7 @@ export class VectorStore {
    * Optimized for edge deployment with limited document sets (e.g., specific blueprints).
    */
   async similaritySearch(queryEmbedding: number[] | Float32Array, topK: number = 3): Promise<DocumentRecord[]> {
+    if (!this.dbPromise) return [];
     const db = await this.dbPromise;
     const allDocs: DocumentRecord[] = await db.getAll(STORE_NAME);
 
@@ -83,6 +88,7 @@ export class VectorStore {
   }
 
   async clearStore(): Promise<void> {
+    if (!this.dbPromise) return;
     const db = await this.dbPromise;
     await db.clear(STORE_NAME);
   }

@@ -51,7 +51,7 @@ export class MultimodalRouter {
 
     if (requiresEscalation) {
       const payload = {
-        type: 'ESCALATION_QUERY',
+        type: 'ESCALATION_QUERY' as const,
         data: { detections, userPrompt },
         timestamp: Date.now()
       };
