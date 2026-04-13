@@ -1,10 +1,10 @@
-import { MLCEngineInterface } from '@mlc-ai/web-llm';
-import { vectorStore } from './vector-db';
+import { MLCEngineInterface } from "@mlc-ai/web-llm";
+import { vectorStore } from "./vector-db";
 
 export interface RAGLog {
   timestamp: number;
   message: string;
-  type: 'INFO' | 'SUCCESS' | 'ERROR';
+  type: "INFO" | "SUCCESS" | "ERROR";
 }
 
 /**
@@ -28,64 +28,70 @@ export class RAGRouter {
     this.logCallback = callback;
   }
 
-  private log(message: string, type: 'INFO' | 'SUCCESS' | 'ERROR' = 'INFO') {
+  private log(message: string, type: "INFO" | "SUCCESS" | "ERROR" = "INFO") {
     this.logCallback({ timestamp: Date.now(), message, type });
   }
 
   /**
    * Main entry point for RAG queries.
    */
-  async executeRAGQuery(query: string, onStream: (chunk: string) => void): Promise<string> {
+  async executeRAGQuery(
+    query: string,
+    onStream: (chunk: string) => void,
+  ): Promise<string> {
     if (!this.engine || !this.embeddingWorker) {
-      throw new Error('RAG Router not fully initialized.');
+      throw new Error("RAG Router not fully initialized.");
     }
 
-    this.log('🔍 Vectorizing situational query...');
-    
+    this.log("🔍 Vectorizing situational query...");
+
     // 1. Get Query Embedding from Worker
     const queryEmbedding = await this.getQueryEmbedding(query);
-    this.log('✅ Embedding generated locally.', 'SUCCESS');
+    this.log("✅ Embedding generated locally.", "SUCCESS");
 
     // 2. Search Local Vector Store
-    this.log('📂 Searching offline document store...');
+    this.log("📂 Searching offline document store...");
     const contextChunks = await vectorStore.similaritySearch(queryEmbedding, 3);
-    
+
     if (contextChunks.length === 0) {
-      this.log('⚠️ No relevant documents found in local cache.', 'INFO');
+      this.log("⚠️ No relevant documents found in local cache.", "INFO");
     } else {
-      this.log(`🎯 Retrieved ${contextChunks.length} relevant context blocks.`, 'SUCCESS');
+      this.log(
+        `🎯 Retrieved ${contextChunks.length} relevant context blocks.`,
+        "SUCCESS",
+      );
     }
 
     // 3. Synthesize Augmented Prompt
-    const contextText = contextChunks.map(c => c.text).join('\n\n---\n\n');
+    const contextText = contextChunks.map((c) => c.text).join("\n\n---\n\n");
     const systemPrompt = `
       [OFFLINE CONTEXT RETRIEVED]:
-      ${contextText || 'No specific document context available.'}
+      ${contextText || "No specific document context available."}
 
       You are ResilNode AI. Use the provided context to answer the query accurately. 
       If the context contains structural blueprints or protocols, prioritize those details.
       If the context does not contain relevant information, rely on your internal knowledge but state clearly that no specific document context was found.
     `;
 
-    this.log('🧠 Generating RAG-augmented response...');
+    this.log("🧠 Generating RAG-augmented response...");
 
     // 4. Trigger WebLLM Inference
     const asyncGen = await this.engine.chat.completions.create({
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Tactical Query: ${query}` }
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `Tactical Query: ${query}` },
       ],
       stream: true,
     });
 
-    let fullResponse = '';
+    let fullResponse = "";
     for await (const chunk of asyncGen) {
-      const content = chunk.choices[0]?.delta?.content || '';
+      const content = chunk.choices[0]?.delta?.content || "";
       fullResponse += content;
       onStream(fullResponse);
     }
 
-    this.log('🏁 Inference cycle complete.', 'SUCCESS');
+    this.log("🏁 Inference cycle complete.", "SUCCESS");
     return fullResponse;
   }
 
@@ -96,17 +102,20 @@ export class RAGRouter {
     return new Promise((resolve, reject) => {
       const handler = (event: MessageEvent) => {
         const { type, payload, message } = event.data;
-        if (type === 'RESULT') {
-          this.embeddingWorker?.removeEventListener('message', handler);
+        if (type === "RESULT") {
+          this.embeddingWorker?.removeEventListener("message", handler);
           resolve(payload);
-        } else if (type === 'ERROR') {
-          this.embeddingWorker?.removeEventListener('message', handler);
+        } else if (type === "ERROR") {
+          this.embeddingWorker?.removeEventListener("message", handler);
           reject(new Error(message));
         }
       };
 
-      this.embeddingWorker?.addEventListener('message', handler);
-      this.embeddingWorker?.postMessage({ type: 'GENERATE_EMBEDDING', payload: text });
+      this.embeddingWorker?.addEventListener("message", handler);
+      this.embeddingWorker?.postMessage({
+        type: "GENERATE_EMBEDDING",
+        payload: text,
+      });
     });
   }
 }

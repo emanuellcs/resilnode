@@ -1,13 +1,16 @@
-'use client';
+"use client";
 
-import { useRef, useState, useEffect, useCallback } from 'react';
+import { useRef, useState, useEffect, useCallback } from "react";
 
 interface CameraCaptureProps {
   onCapture: (blob: Blob) => void;
   isProcessing: boolean;
 }
 
-export default function CameraCapture({ onCapture, isProcessing }: CameraCaptureProps) {
+export default function CameraCapture({
+  onCapture,
+  isProcessing,
+}: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -18,7 +21,7 @@ export default function CameraCapture({ onCapture, isProcessing }: CameraCapture
     setError(null);
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' }, // Target the rear camera
+        video: { facingMode: "environment" }, // Target the rear camera
         audio: false,
       });
       if (videoRef.current) {
@@ -27,8 +30,8 @@ export default function CameraCapture({ onCapture, isProcessing }: CameraCapture
       setStream(mediaStream);
       setIsActive(true);
     } catch (err) {
-      console.error('Camera access error:', err);
-      setError('Camera access denied or unavailable.');
+      console.error("Camera access error:", err);
+      setError("Camera access denied or unavailable.");
     }
   }, []);
 
@@ -46,12 +49,16 @@ export default function CameraCapture({ onCapture, isProcessing }: CameraCapture
       const video = videoRef.current;
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext("2d");
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        canvas.toBlob((blob) => {
-          if (blob) onCapture(blob);
-        }, 'image/jpeg', 0.85);
+        canvas.toBlob(
+          (blob) => {
+            if (blob) onCapture(blob);
+          },
+          "image/jpeg",
+          0.85,
+        );
       }
     }
   };
@@ -74,7 +81,11 @@ export default function CameraCapture({ onCapture, isProcessing }: CameraCapture
           >
             Activate Optical Intake
           </button>
-          {error && <p className="text-[10px] text-red-500 uppercase px-4 text-center">{error}</p>}
+          {error && (
+            <p className="text-[10px] text-red-500 uppercase px-4 text-center">
+              {error}
+            </p>
+          )}
         </div>
       ) : (
         <>
@@ -86,10 +97,12 @@ export default function CameraCapture({ onCapture, isProcessing }: CameraCapture
             className="w-full h-full object-cover grayscale brightness-75 contrast-125 hover:grayscale-0 transition-all duration-500"
           />
           <canvas ref={canvasRef} className="hidden" />
-          
+
           <div className="absolute top-2 left-2 flex items-center gap-2">
             <div className="w-2 h-2 bg-red-600 rounded-full animate-pulse shadow-[0_0_8px_rgba(220,38,38,0.8)]" />
-            <span className="text-[8px] text-zinc-400 font-black uppercase tracking-[0.2em]">Live Feed // ENV_FRONT</span>
+            <span className="text-[8px] text-zinc-400 font-black uppercase tracking-[0.2em]">
+              Live Feed // ENV_FRONT
+            </span>
           </div>
 
           <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -109,7 +122,7 @@ export default function CameraCapture({ onCapture, isProcessing }: CameraCapture
           </div>
         </>
       )}
-      
+
       {/* Decorative corners */}
       <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-zinc-500/30 pointer-events-none" />
       <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-zinc-500/30 pointer-events-none" />

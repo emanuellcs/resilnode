@@ -1,6 +1,6 @@
-import { MLCEngineInterface } from '@mlc-ai/web-llm';
-import { syncQueue } from './sync-queue';
-import { WebRTCMesh } from './webrtc-mesh';
+import { MLCEngineInterface } from "@mlc-ai/web-llm";
+import { syncQueue } from "./sync-queue";
+import { WebRTCMesh } from "./webrtc-mesh";
 
 export interface VisionDetection {
   label: string;
@@ -36,32 +36,42 @@ export class MultimodalRouter {
   async executeReasoning(
     detections: VisionDetection[],
     userPrompt: string,
-    onStream: (chunk: string) => void
+    onStream: (chunk: string) => void,
   ) {
-    if (!this.engine) throw new Error('LLM Engine not initialized in router.');
+    if (!this.engine) throw new Error("LLM Engine not initialized in router.");
 
-    const visualContext = detections.length > 0 
-      ? detections.map(d => `${d.label} (Confidence: ${Math.round(d.score * 100)}%)`).join(', ')
-      : 'No significant objects detected.';
+    const visualContext =
+      detections.length > 0
+        ? detections
+            .map(
+              (d) => `${d.label} (Confidence: ${Math.round(d.score * 100)}%)`,
+            )
+            .join(", ")
+        : "No significant objects detected.";
 
     // Escalation Heuristic: If prompt implies complex structural analysis or "calculate"
-    const requiresEscalation = userPrompt.toLowerCase().includes('calculate') || 
-                              userPrompt.toLowerCase().includes('structural') ||
-                              userPrompt.toLowerCase().includes('stress');
+    const requiresEscalation =
+      userPrompt.toLowerCase().includes("calculate") ||
+      userPrompt.toLowerCase().includes("structural") ||
+      userPrompt.toLowerCase().includes("stress");
 
     if (requiresEscalation) {
       const payload = {
-        type: 'ESCALATION_QUERY' as const,
+        type: "ESCALATION_QUERY" as const,
         data: { detections, userPrompt },
-        timestamp: Date.now()
+        timestamp: Date.now(),
       };
 
       if (this.mesh && !this.mesh.isDisconnected()) {
         this.mesh.sendMessage(payload);
-        onStream('[MESH] Escalating situational query to Tactical Command node via WebRTC...');
+        onStream(
+          "[MESH] Escalating situational query to Tactical Command node via WebRTC...",
+        );
       } else {
         await syncQueue.enqueuePayload(payload);
-        onStream('[OFFLINE] Network fragmented. Query serialized to SyncQueue for synchronization upon mesh reconciliation.');
+        onStream(
+          "[OFFLINE] Network fragmented. Query serialized to SyncQueue for synchronization upon mesh reconciliation.",
+        );
       }
     }
 
@@ -71,15 +81,15 @@ export class MultimodalRouter {
 
     const asyncGen = await this.engine.chat.completions.create({
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: fullPrompt }
+        { role: "system", content: systemPrompt },
+        { role: "user", content: fullPrompt },
       ],
       stream: true,
     });
 
-    let fullResponse = '';
+    let fullResponse = "";
     for await (const chunk of asyncGen) {
-      const content = chunk.choices[0]?.delta?.content || '';
+      const content = chunk.choices[0]?.delta?.content || "";
       fullResponse += content;
       onStream(fullResponse);
     }

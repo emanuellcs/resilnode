@@ -1,30 +1,33 @@
-import { openDB, IDBPDatabase } from 'idb';
+import { openDB, IDBPDatabase } from "idb";
 
 export interface SyncPayload {
   id?: number;
-  type: 'ESCALATION_QUERY' | 'SENSOR_LOG';
+  type: "ESCALATION_QUERY" | "SENSOR_LOG";
   data: unknown;
   timestamp: number;
 }
 
-const DB_NAME = 'resilnode-sync';
-const STORE_NAME = 'delta-queue';
+const DB_NAME = "resilnode-sync";
+const STORE_NAME = "delta-queue";
 
 export class SyncQueue {
   private db: Promise<IDBPDatabase> | null = null;
 
   constructor() {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== "undefined") {
       this.db = openDB(DB_NAME, 1, {
         upgrade(db) {
-          db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+          db.createObjectStore(STORE_NAME, {
+            keyPath: "id",
+            autoIncrement: true,
+          });
         },
       });
     }
   }
 
-  async enqueuePayload(payload: Omit<SyncPayload, 'id'>) {
-    if (!this.db) throw new Error('SyncQueue not initialized on client.');
+  async enqueuePayload(payload: Omit<SyncPayload, "id">) {
+    if (!this.db) throw new Error("SyncQueue not initialized on client.");
     const db = await this.db;
     await db.add(STORE_NAME, payload);
   }
@@ -48,7 +51,7 @@ export class SyncQueue {
   }
 
   async flushQueue(dataChannel: RTCDataChannel) {
-    if (dataChannel.readyState !== 'open') return;
+    if (dataChannel.readyState !== "open") return;
 
     const payloads = await this.getAllPayloads();
     for (const payload of payloads) {
@@ -58,8 +61,8 @@ export class SyncQueue {
           await this.dequeuePayload(payload.id);
         }
       } catch (error) {
-        console.error('[SyncQueue] Failed to flush payload:', error);
-        break; 
+        console.error("[SyncQueue] Failed to flush payload:", error);
+        break;
       }
     }
   }

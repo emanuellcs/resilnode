@@ -1,4 +1,4 @@
-export type DeviceTier = 'TIER_1_EDGE' | 'TIER_4_COMMAND';
+export type DeviceTier = "TIER_1_EDGE" | "TIER_4_COMMAND";
 
 export interface HardwareProbeResult {
   tier: DeviceTier;
@@ -16,30 +16,30 @@ export interface HardwareProbeResult {
 export async function probeHardware(): Promise<HardwareProbeResult> {
   if (!navigator.gpu) {
     return {
-      tier: 'TIER_1_EDGE',
+      tier: "TIER_1_EDGE",
       adapterInfo: null,
       maxBufferSize: 0,
       maxStorageBufferBindingSize: 0,
       gpuSupported: false,
-      error: 'WebGPU not supported in this environment.',
+      error: "WebGPU not supported in this environment.",
     };
   }
 
   try {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) {
-      throw new Error('No appropriate GPU adapter found.');
+      throw new Error("No appropriate GPU adapter found.");
     }
 
     // Attempt to request maximal buffer limits to bypass browser defaults
     const requiredLimits: Record<string, number> = {};
-    
+
     // Attempting to push limits for high-tier hardware
     // Standard limits are 256MB/128MB. We probe for what the hardware CAN do.
     const limitsToProbe: (keyof GPUSupportedLimits)[] = [
-      'maxBufferSize',
-      'maxStorageBufferBindingSize',
-      'maxComputeWorkgroupStorageSize',
+      "maxBufferSize",
+      "maxStorageBufferBindingSize",
+      "maxComputeWorkgroupStorageSize",
     ];
 
     for (const limit of limitsToProbe) {
@@ -53,10 +53,14 @@ export async function probeHardware(): Promise<HardwareProbeResult> {
       requiredLimits,
     });
 
-    const info = (adapter as any).info || (await (adapter as any).requestAdapterInfo?.()) || null;
-    
+    const info =
+      (adapter as any).info ||
+      (await (adapter as any).requestAdapterInfo?.()) ||
+      null;
+
     const maxBufferSize = device.limits.maxBufferSize;
-    const maxStorageBufferBindingSize = device.limits.maxStorageBufferBindingSize;
+    const maxStorageBufferBindingSize =
+      device.limits.maxStorageBufferBindingSize;
 
     // Classification Logic:
     // TIER_4_COMMAND requires significant storage buffer binding (typically > 1GB for MoE)
@@ -64,7 +68,7 @@ export async function probeHardware(): Promise<HardwareProbeResult> {
     const isHighTier = maxStorageBufferBindingSize >= 1024 * 1024 * 1024; // >= 1GB as threshold
 
     return {
-      tier: isHighTier ? 'TIER_4_COMMAND' : 'TIER_1_EDGE',
+      tier: isHighTier ? "TIER_4_COMMAND" : "TIER_1_EDGE",
       adapterInfo: info,
       maxBufferSize,
       maxStorageBufferBindingSize,
@@ -72,12 +76,15 @@ export async function probeHardware(): Promise<HardwareProbeResult> {
     };
   } catch (error) {
     return {
-      tier: 'TIER_1_EDGE',
+      tier: "TIER_1_EDGE",
       adapterInfo: null,
       maxBufferSize: 0,
       maxStorageBufferBindingSize: 0,
       gpuSupported: false,
-      error: error instanceof Error ? error.message : 'Unknown hardware probing error.',
+      error:
+        error instanceof Error
+          ? error.message
+          : "Unknown hardware probing error.",
     };
   }
 }
