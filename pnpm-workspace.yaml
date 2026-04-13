@@ -3,3 +3,5 @@ ignoredBuiltDependencies:
   - unrs-resolver
 onlyBuiltDependencies:
   - esbuild
+  - onnxruntime-node
+  - protobufjs
