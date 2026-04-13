@@ -9,9 +9,11 @@ import { syncQueue } from '@/lib/sync-queue';
 import { vectorStore } from '@/lib/vector-db';
 import { ragRouter, type RAGLog } from '@/lib/rag-router';
 import { chunkText, CRISIS_DATASETS } from '@/lib/document-parser';
+import { triageOrchestrator } from '@/lib/triage-orchestrator';
 import type { InitProgressReport, MLCEngineInterface } from '@mlc-ai/web-llm';
 import CameraCapture from '@/components/vision/camera-capture';
 import QRHandshake from '@/components/network/qr-handshake';
+import { TelemetryOverlay } from '@/components/telemetry-overlay';
 
 export default function CommandCenter() {
   // Phase 1: Hardware Probe State
@@ -31,6 +33,7 @@ export default function CommandCenter() {
   const [isVisionReady, setIsVisionReady] = useState(false);
   const [isProcessingVision, setIsProcessingVision] = useState(false);
   const [visionStatus, setVisionStatus] = useState('OFFLINE');
+  const [lastBlob, setLastBlob] = useState<Blob | null>(null);
 
   // Phase 4: Mesh Networking State
   const [meshStatus, setMeshStatus] = useState<MeshStatus>('DISCONNECTED');
@@ -41,9 +44,9 @@ export default function CommandCenter() {
   const mesh = useMemo(() => new WebRTCMesh(
     (status) => setMeshStatus(status),
     (message: unknown) => {
-      const msg = message as { type: string; data: any };
+      const msg = message as { type: string; data: unknown };
       if (msg.type === 'ESCALATION_QUERY' && engineReady) {
-        setOutput(`[MESH_RECEIVE] Escalation Query: ${msg.data.userPrompt}. Analyzing...`);
+        setOutput(`[MESH_INBOUND] Escalation request received. Processing via 26B MoE RAG pipeline...`);
       }
     }
   ), [engineReady]);
@@ -54,6 +57,11 @@ export default function CommandCenter() {
   const [ragLogs, setRagLogs] = useState<RAGLog[]>([]);
   const [isIndexing, setIsIndexing] = useState(false);
   const [embeddingStatus, setEmbeddingStatus] = useState('OFFLINE');
+
+  // Phase 6: Synthesis & Telemetry
+  const [ttft, setTtft] = useState(0);
+  const [tps, setTps] = useState(0);
+  const [vramEst, setVramEst] = useState('0.00 GB');
 
   // Terminal State
   const [prompt, setPrompt] = useState('');
@@ -66,6 +74,7 @@ export default function CommandCenter() {
       const result = await probeHardware();
       setProbeResult(result);
       setIsProbing(false);
+      triageOrchestrator.setTier(result.tier);
     }
     runProbe();
 
@@ -85,16 +94,13 @@ export default function CommandCenter() {
       }
     };
     visionWorker.current.postMessage({ type: 'INIT' });
+    triageOrchestrator.setVisionWorker(visionWorker.current);
 
-    // Phase 5: Initialize Embedding Worker & Vector DB
+    // Phase 5: Initialize Embedding Worker
     embeddingWorker.current = new Worker(new URL('@/workers/embedding.worker.ts', import.meta.url), { type: 'module' });
     embeddingWorker.current.onmessage = (event) => {
       const { type, message } = event.data;
-      if (type === 'STATUS') {
-        setEmbeddingStatus(message);
-      } else if (type === 'ERROR') {
-        setEmbeddingStatus(`ERROR: ${message}`);
-      }
+      if (type === 'STATUS') setEmbeddingStatus(message);
     };
     embeddingWorker.current.postMessage({ type: 'INIT' });
     ragRouter.setEmbeddingWorker(embeddingWorker.current);
@@ -106,7 +112,8 @@ export default function CommandCenter() {
     };
     updateDbCount();
 
-    // Phase 4: Sync Queue Update
+    // Phase 4: Mesh
+    triageOrchestrator.setMesh(mesh);
     const syncInterval = setInterval(async () => {
       const count = await syncQueue.getQueueCount();
       setQueueCount(count);
@@ -139,15 +146,7 @@ export default function CommandCenter() {
       visionWorker.current?.terminate();
       embeddingWorker.current?.terminate();
     };
-  }, []);
-
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  };
+  }, [mesh]);
 
   const handleHydrate = async () => {
     if (!probeResult) return;
@@ -155,91 +154,71 @@ export default function CommandCenter() {
     try {
       const llmEngine = await initializeLLM(probeResult.tier, (report) => {
         setLoadingProgress(report);
+        if (report.text.includes('Loading weights')) {
+          // Mock VRAM estimation based on progress
+          const est = (probeResult.tier === 'TIER_4_COMMAND' ? 14.5 : 1.8) * (report.progress || 0.1);
+          setVramEst(`${est.toFixed(2)} GB`);
+        }
       });
       setEngine(llmEngine);
       multimodalRouter.setEngine(llmEngine);
-      multimodalRouter.setMesh(mesh);
       ragRouter.setEngine(llmEngine);
       setEngineReady(true);
     } catch (error) {
       console.error("Hydration Error:", error);
-      setOutput(`[FATAL] Hydration failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setOutput(`[FATAL] Hydration failed.`);
     } finally {
       setIsHydrating(false);
     }
   };
 
-  const handlePreCache = async () => {
-    if (!embeddingWorker.current || isIndexing) return;
-    setIsIndexing(true);
-    setRagLogs([]);
-    
-    try {
-      ragRouter.setLogCallback((log) => setRagLogs(prev => [log, ...prev]));
-      
-      for (const dataset of CRISIS_DATASETS) {
-        const chunks = chunkText(dataset.content);
-        for (const chunk of chunks) {
-          // Wrap embedding generation in a promise for sequential indexing
-          await new Promise<void>((resolve, reject) => {
-            const handler = async (event: MessageEvent) => {
-              const { type, payload, message } = event.data;
-              if (type === 'RESULT') {
-                embeddingWorker.current?.removeEventListener('message', handler);
-                await vectorStore.addDocument(dataset.title + ": " + chunk, payload);
-                resolve();
-              } else if (type === 'ERROR') {
-                embeddingWorker.current?.removeEventListener('message', handler);
-                reject(new Error(message));
-              }
-            };
-            embeddingWorker.current?.addEventListener('message', handler);
-            embeddingWorker.current?.postMessage({ type: 'GENERATE_EMBEDDING', payload: chunk });
-          });
-        }
-      }
-      
-      const count = await vectorStore.getDocumentCount();
-      setDbDocCount(count);
-      ragRouter.setLogCallback((log) => setRagLogs(prev => [log, ...prev].slice(0, 5)));
-    } catch (error) {
-      console.error("Indexing Error:", error);
-    } finally {
-      setIsIndexing(false);
-    }
-  };
-
   const handleCapture = (blob: Blob) => {
-    if (!visionWorker.current || !isVisionReady) return;
+    setLastBlob(blob);
     setIsProcessingVision(true);
-    visionWorker.current.postMessage({ type: 'PROCESS_IMAGE', payload: blob });
+    visionWorker.current?.postMessage({ type: 'PROCESS_IMAGE', payload: blob });
   };
 
-  const handleExecute = async () => {
+  const handleTriageInitiation = async () => {
     if (!engineReady || isGenerating) return;
     setIsGenerating(true);
     setOutput('');
     setRagLogs([]);
+    const startTime = Date.now();
+    let firstTokenTime = 0;
+    let tokenCount = 0;
 
     try {
-      // If we have an active vision context, use multimodal router
-      if (visionDetections.length > 0) {
-        await multimodalRouter.executeReasoning(visionDetections, prompt, (chunk) => setOutput(chunk));
-      } else {
-        // Use RAG router for text queries
-        await ragRouter.executeRAGQuery(prompt, (chunk) => setOutput(chunk));
-      }
+      await triageOrchestrator.executeTriage(lastBlob, prompt, (chunk) => {
+        if (!firstTokenTime) {
+          firstTokenTime = Date.now();
+          setTtft(firstTokenTime - startTime);
+        }
+        tokenCount++;
+        setOutput(chunk);
+        
+        // Dynamic TPS calculation
+        const elapsed = (Date.now() - firstTokenTime) / 1000;
+        if (elapsed > 0) setTps(tokenCount / elapsed);
+      });
     } catch (error) {
-      console.error("Execution Error:", error);
-      setOutput(`[TERMINAL ERROR] ${error instanceof Error ? error.message : 'Execution failed'}`);
+      console.error("Triage Error:", error);
+      setOutput(`[CRITICAL FAILURE] Autonomous loop interrupted.`);
     } finally {
       setIsGenerating(false);
     }
   };
 
   return (
-    <main className="flex-1 flex flex-col p-6 font-mono min-h-screen relative overflow-x-hidden">
-      {/* Handshake Modal Overlay */}
+    <main className="flex-1 flex flex-col p-6 font-mono min-h-screen relative overflow-x-hidden bg-zinc-950 text-zinc-100">
+      <TelemetryOverlay 
+        vramUsage={vramEst}
+        ttft={ttft}
+        tps={tps}
+        queueCount={queueCount}
+        meshStatus={meshStatus}
+      />
+
+      {/* Handshake Modal */}
       {showHandshake && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/95 backdrop-blur-sm">
           <div className="w-full max-w-4xl">
@@ -264,194 +243,160 @@ export default function CommandCenter() {
         </div>
       )}
 
-      <header className="mb-8 border-b border-zinc-800 pb-4 flex justify-between items-center">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tighter uppercase text-zinc-100">
-            ResilNode <span className="text-zinc-500">v1.0.0</span>
+      <header className="mb-8 border-b border-zinc-800 pb-4 flex justify-between items-start">
+        <div className="space-y-1">
+          <h1 className="text-3xl font-black tracking-tighter uppercase inline-flex items-center gap-3">
+            <span className="bg-white text-zinc-950 px-2">ResilNode</span> 
+            <span className="text-zinc-500">v1.0.0-PROTOTYPE</span>
           </h1>
-          <p className="text-xs text-zinc-500 uppercase tracking-widest mt-1">
-            Zero-Connectivity AI Command Center
+          <p className="text-[10px] text-zinc-500 uppercase tracking-[0.3em]">
+            Zero-Connectivity AI Command Center // Sector 7G
           </p>
         </div>
-        <div className="flex flex-col items-end gap-1 text-[10px] uppercase">
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full animate-pulse ${isProbing ? 'bg-yellow-500' : 'bg-green-500'}`} />
-            <span className="text-zinc-400">{isProbing ? 'Probing Hardware...' : 'System Ready'}</span>
+        
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex gap-4">
+            <div className="flex flex-col items-end">
+              <span className="text-[8px] text-zinc-600 uppercase font-black">Mesh Protocol</span>
+              <span className={`text-[10px] font-bold ${meshStatus === 'CONNECTED' ? 'text-emerald-500' : 'text-zinc-700'}`}>{meshStatus}</span>
+            </div>
+            <div className="flex flex-col items-end">
+              <span className="text-[8px] text-zinc-600 uppercase font-black">Vision Link</span>
+              <span className="text-[10px] text-zinc-400 font-bold">{isVisionReady ? 'ACTIVE' : 'OFFLINE'}</span>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${heartbeatStatus === 'PROTECTED' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-zinc-800'}`} />
-            <span className="text-zinc-500">VRAM Guard: {heartbeatStatus}</span>
-          </div>
-          <div className="flex items-center gap-2 text-zinc-600">
-             <span>Mesh: <span className={meshStatus === 'CONNECTED' ? 'text-emerald-400' : 'text-zinc-700'}>{meshStatus}</span></span>
-             <span className="mx-1">|</span>
-             <span>Vision: <span className={isVisionReady ? 'text-zinc-400' : 'text-zinc-700'}>ONLINE</span></span>
-             <span className="mx-1">|</span>
-             <span>Embed: <span className={embeddingStatus.includes('Online') ? 'text-zinc-400' : 'text-zinc-700'}>ONLINE</span></span>
-          </div>
-          <div className="flex gap-2 mt-1">
-            <button 
-              onClick={() => setShowHandshake(true)}
-              className="px-2 py-0.5 border border-zinc-700 hover:border-zinc-400 text-zinc-500 hover:text-zinc-200 transition-colors"
-            >
-              Handshake Node
-            </button>
-          </div>
+          <button 
+            onClick={() => setShowHandshake(true)}
+            className="px-3 py-1 bg-zinc-900 border border-zinc-800 hover:border-zinc-500 text-zinc-500 hover:text-zinc-100 text-[9px] font-black uppercase transition-all"
+          >
+            Optical Sync
+          </button>
         </div>
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 flex-1">
-        {/* Left Column: Sensory & Status */}
-        <div className="space-y-6 flex flex-col lg:col-span-1">
-          <section className="bg-zinc-900/50 border border-zinc-800 p-5 rounded-sm">
-            <h2 className="text-xs uppercase text-zinc-500 font-bold mb-4 border-b border-zinc-800 pb-2">
-              Optical Context Intake
+        {/* Left: Input & Data */}
+        <div className="space-y-6 lg:col-span-1">
+          <section className="bg-zinc-900/30 border border-zinc-800 p-5 rounded-sm relative group">
+            <h2 className="text-[10px] uppercase text-zinc-500 font-black mb-4 flex justify-between">
+              <span>Sensory Intake</span>
+              <span className="text-zinc-700">0x0F44</span>
             </h2>
             <CameraCapture onCapture={handleCapture} isProcessing={isProcessingVision} />
-            
-            <div className="mt-4 p-4 bg-zinc-950 border border-zinc-800 min-h-[60px]">
-               <div className="text-[9px] uppercase text-zinc-600 mb-2 tracking-widest">Visual Tags</div>
-               <div className="flex flex-wrap gap-2">
-                  {isProcessingVision ? (
-                    <span className="text-[10px] text-zinc-500 animate-pulse uppercase">Analyzing...</span>
-                  ) : visionDetections.length > 0 ? (
-                    visionDetections.map((d, i) => (
-                      <span key={i} className="px-2 py-0.5 bg-zinc-900 text-zinc-300 border border-zinc-700 text-[9px] uppercase font-bold">
-                        {d.label}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="text-[10px] text-zinc-700 uppercase italic">Idle</span>
-                  )}
-               </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {visionDetections.map((d, i) => (
+                <span key={i} className="px-2 py-0.5 bg-emerald-950/30 text-emerald-500 border border-emerald-900/50 text-[9px] uppercase font-black">
+                  {d.label}
+                </span>
+              ))}
             </div>
           </section>
 
-          <section className="bg-zinc-900/50 border border-zinc-800 p-5 rounded-sm">
-            <h2 className="text-xs uppercase text-zinc-500 font-bold mb-4 border-b border-zinc-800 pb-2">
-              Database / GIS
-            </h2>
-            <div className="space-y-4">
+          <section className="bg-zinc-900/30 border border-zinc-800 p-5 rounded-sm">
+            <h2 className="text-[10px] uppercase text-zinc-500 font-black mb-4">Offline Datasets</h2>
+            <div className="space-y-3">
               <div className="flex justify-between items-center text-[10px]">
-                <span className="text-zinc-500 uppercase">Offline Documents:</span>
-                <span className="text-zinc-100 font-bold">{dbDocCount} Chunks</span>
+                <span className="text-zinc-600">Local Vector Shards:</span>
+                <span className="text-zinc-300 font-bold">{dbDocCount}</span>
               </div>
-              
               <button 
-                onClick={handlePreCache}
+                onClick={async () => {
+                  setIsIndexing(true);
+                  for (const dataset of CRISIS_DATASETS) {
+                    const chunks = chunkText(dataset.content);
+                    for (const chunk of chunks) {
+                      await ragRouter['getQueryEmbedding'](chunk).then(emb => vectorStore.addDocument(chunk, emb));
+                    }
+                  }
+                  setDbDocCount(await vectorStore.getDocumentCount());
+                  setIsIndexing(false);
+                }}
                 disabled={isIndexing}
-                className="w-full py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 font-bold uppercase text-[9px] tracking-widest transition-colors border border-zinc-600 disabled:opacity-50"
+                className="w-full py-2 border border-dashed border-zinc-700 hover:border-zinc-400 text-zinc-600 hover:text-zinc-200 text-[10px] font-bold uppercase transition-all"
               >
-                {isIndexing ? 'Indexing Data...' : 'Pre-Cache Crisis Datasets'}
+                {isIndexing ? 'Indexing...' : 'Inject Emergency Manuals'}
               </button>
-
-              <div className="bg-zinc-950 p-3 border border-zinc-800 h-32 overflow-y-auto scrollbar-none">
-                 <div className="text-[8px] uppercase text-zinc-600 mb-2 font-black border-b border-zinc-900 pb-1">RAG Execution Log</div>
-                 {ragLogs.length === 0 ? (
-                   <div className="text-[8px] text-zinc-800 uppercase italic">Awaiting query...</div>
-                 ) : (
-                   ragLogs.map((log, i) => (
-                     <div key={i} className={`text-[8px] uppercase leading-relaxed ${log.type === 'SUCCESS' ? 'text-emerald-600' : log.type === 'ERROR' ? 'text-red-600' : 'text-zinc-500'}`}>
-                       [{new Date(log.timestamp).toLocaleTimeString([], { hour12: false })}] {log.message}
-                     </div>
-                   ))
-                 )}
-              </div>
             </div>
           </section>
 
-          <section className="bg-zinc-900/50 border border-zinc-800 p-5 rounded-sm">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2 text-[10px]">
-                <div className="flex justify-between">
-                  <span className="text-zinc-500 uppercase">Tier:</span>
-                  <span className={`font-bold ${probeResult?.tier === 'TIER_4_COMMAND' ? 'text-emerald-400' : 'text-amber-400'}`}>
-                    {probeResult?.tier || 'UNKNOWN'}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-zinc-500 uppercase">VRAM:</span>
-                  <span className="text-zinc-300">{probeResult ? formatBytes(probeResult.maxStorageBufferBindingSize) : '---'}</span>
-                </div>
-              </div>
-              <div>
-                {!engineReady && !isHydrating ? (
-                   <button onClick={handleHydrate} className="w-full h-full py-2 bg-emerald-950 text-emerald-400 font-bold uppercase text-[9px] tracking-widest border border-emerald-900">
-                     Hydrate LLM
-                   </button>
-                ) : isHydrating ? (
-                  <div className="text-center">
-                    <div className="text-[9px] text-emerald-400 font-black animate-pulse uppercase">Allocating...</div>
-                    <div className="text-[8px] text-zinc-500 mt-1">{loadingProgress?.progress ? Math.round(loadingProgress.progress * 100) : 0}%</div>
-                  </div>
-                ) : (
-                  <div className="text-center py-2 bg-emerald-950/20 border border-emerald-900/50">
-                    <span className="text-emerald-500 font-black uppercase text-[9px]">Online</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </section>
+          <div className="mt-auto">
+             {!engineReady ? (
+               <button 
+                 onClick={handleHydrate}
+                 disabled={isHydrating}
+                 className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-black uppercase text-xs tracking-[0.2em] shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all disabled:opacity-50"
+               >
+                 {isHydrating ? 'Allocating VRAM...' : 'Engage AI Runtime'}
+               </button>
+             ) : (
+               <div className="p-4 border-2 border-emerald-500/20 bg-emerald-500/5 text-center">
+                  <span className="text-emerald-500 font-black uppercase text-xs tracking-widest animate-pulse">Neural Grid Online</span>
+               </div>
+             )}
+          </div>
         </div>
 
-        {/* Right Column: Reasoning Dashboard */}
-        <section className={`lg:col-span-2 flex flex-col border border-zinc-800 bg-zinc-950 transition-opacity duration-500 ${engineReady ? 'opacity-100' : 'opacity-20 pointer-events-none'}`}>
-          <div className="bg-zinc-900/80 border-b border-zinc-800 p-2 flex justify-between items-center">
-             <h2 className="text-[10px] uppercase text-zinc-400 font-bold tracking-widest">
-               Tactical Terminal <span className="text-zinc-700">| zero-server:reasoning</span>
-             </h2>
-             <div className="flex gap-1">
-                <div className="w-2 h-2 bg-zinc-800 rounded-full" />
-                <div className="w-2 h-2 bg-zinc-800 rounded-full" />
-                <div className={`w-2 h-2 rounded-full ${isGenerating ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'}`} />
+        {/* Right: Terminal */}
+        <section className={`lg:col-span-2 flex flex-col border border-zinc-800 bg-zinc-950 shadow-2xl relative transition-opacity ${!engineReady && 'opacity-40 pointer-events-none'}`}>
+          <div className="absolute top-0 right-0 p-2 text-[8px] text-zinc-800 uppercase font-black">
+            Runtime: {probeResult?.tier} {'//'} {vramEst}
+          </div>
+          
+          <div className="bg-zinc-900/50 border-b border-zinc-800 p-3 flex items-center justify-between">
+             <div className="flex gap-2 items-center">
+                <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                <span className="text-[10px] text-zinc-400 font-black uppercase tracking-widest">Tactical Reasoning Output</span>
+             </div>
+             <div className="text-[9px] text-zinc-600">
+                LAT: 34.0522 N | LON: 118.2437 W
              </div>
           </div>
           
-          <div className="flex-1 p-6 overflow-y-auto text-sm text-zinc-300 font-mono relative scrollbar-thin scrollbar-thumb-zinc-800">
+          <div className="flex-1 p-8 overflow-y-auto font-mono text-sm leading-relaxed text-zinc-300 scrollbar-thin scrollbar-thumb-zinc-800">
              {output ? (
-               <div className="whitespace-pre-wrap leading-relaxed selection:bg-emerald-500/30">{output}</div>
+               <div className="whitespace-pre-wrap selection:bg-emerald-500/30">{output}</div>
              ) : (
-               <div className="text-zinc-800 select-none uppercase text-[11px] space-y-1">
-                 <div>[READY] Awaiting situational query...</div>
-                 <div>[INFO] RAG pipeline active. Local documents will enrich responses.</div>
-                 <div>[INFO] Mesh queue status: {queueCount} payloads pending.</div>
+               <div className="space-y-4 opacity-30 select-none">
+                 <p className="text-zinc-500 text-xs">AWAITING TRIAGE INITIATION...</p>
+                 <div className="h-px bg-zinc-900" />
+                 <div className="grid grid-cols-2 gap-4">
+                    <div className="h-2 bg-zinc-900 w-full" />
+                    <div className="h-2 bg-zinc-900 w-3/4" />
+                    <div className="h-2 bg-zinc-900 w-1/2" />
+                    <div className="h-2 bg-zinc-900 w-full" />
+                 </div>
                </div>
              )}
              {isGenerating && (
-               <div className="inline-block w-2 h-4 bg-emerald-500 ml-1 animate-pulse align-middle" />
+               <span className="inline-block w-2 h-4 bg-emerald-500 ml-1 animate-pulse align-middle" />
              )}
           </div>
 
-          <div className="p-4 bg-zinc-900/50 border-t border-zinc-800">
-             <div className="flex gap-3">
+          <div className="p-6 bg-zinc-900/30 border-t border-zinc-800">
+             <div className="flex flex-col gap-4">
                 <textarea 
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleExecute();
-                    }
-                  }}
-                  placeholder="Ask about structural data, medical protocols, or mesh status..."
-                  className="flex-1 bg-zinc-950 border border-zinc-800 p-3 text-sm focus:outline-none focus:border-zinc-500 text-zinc-100 resize-none h-20 font-mono placeholder:text-zinc-800"
+                  placeholder="Enter responder command or situation summary..."
+                  className="w-full bg-zinc-950 border border-zinc-800 p-4 text-sm focus:outline-none focus:border-zinc-500 text-zinc-100 resize-none h-24 font-mono placeholder:text-zinc-800"
                 />
                 <button 
-                  onClick={handleExecute}
-                  disabled={isGenerating || (!prompt.trim() && visionDetections.length === 0) || !engineReady}
-                  className="px-8 bg-zinc-100 hover:bg-white text-zinc-950 font-black uppercase text-[10px] tracking-widest transition-all disabled:opacity-20 flex items-center justify-center active:scale-95 border-b-2 border-zinc-400 active:border-b-0 active:translate-y-[1px]"
+                  onClick={handleTriageInitiation}
+                  disabled={isGenerating || !engineReady || (!prompt.trim() && !lastBlob)}
+                  className="w-full py-4 bg-white text-zinc-950 font-black uppercase text-sm tracking-[0.4em] hover:bg-zinc-200 transition-all active:scale-[0.99] disabled:opacity-20"
                 >
-                  Analyze
+                  Initiate Triage
                 </button>
              </div>
           </div>
         </section>
       </div>
 
-      <footer className="mt-6 flex justify-between text-[9px] text-zinc-700 uppercase tracking-widest border-t border-zinc-900 pt-2">
-        <div>ResilNode Agentic Pipeline // PHASE_05_RAG</div>
-        <div className="flex gap-4">
-           <span>VectorDB: {dbDocCount} slots</span>
+      <footer className="mt-6 flex justify-between text-[9px] text-zinc-700 uppercase tracking-[0.2em] border-t border-zinc-900 pt-4 font-black">
+        <div>ResilNode :: Zero-Signal Mesh Collective {'//'} Phase 06 Finish</div>
+        <div className="flex gap-6">
+           <span>Memory Guard: Active</span>
+           <span>Heartbeat: {heartbeatStatus}</span>
            <span>UTC: {new Date().toISOString().split('T')[1].split('.')[0]}</span>
         </div>
       </footer>

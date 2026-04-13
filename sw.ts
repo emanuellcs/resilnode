@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { ServiceWorkerMLCEngineHandler } from '@mlc-ai/web-llm';
 
-const CACHE_NAME = 'resilnode-v1';
+const CACHE_NAME = 'resilnode-app-shell-v1';
+const MODEL_CACHE_NAME = 'resilnode-models-v1';
 const ASSETS_TO_CACHE = [
   '/',
   '/manifest.json',
@@ -25,17 +26,14 @@ self.addEventListener('activate', (event: any) => {
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames
-          .filter((name) => name !== CACHE_NAME)
+          .filter((name) => name !== CACHE_NAME && name !== MODEL_CACHE_NAME)
           .map((name) => caches.delete(name))
       );
     })
   );
   
-  // Instantiate the WebLLM engine handler
   handler = new ServiceWorkerMLCEngineHandler();
   
-  // Heartbeat Protocol: 5000ms loop to keep VRAM from being evicted
-  // Broadcasts to all connected clients
   setInterval(() => {
     (self as any).clients.matchAll().then((clients: any[]) => {
       clients.forEach(client => {
@@ -52,16 +50,52 @@ self.addEventListener('activate', (event: any) => {
 });
 
 self.addEventListener('fetch', (event: any) => {
+  const url = new URL(event.request.url);
+
+  // 1. Cache-First for Heavy AI Assets (WebLLM weights, Transformers.js binaries)
+  const isAIAsset = url.hostname.includes('huggingface.co') || 
+                    url.pathname.endsWith('.wasm') || 
+                    url.pathname.endsWith('.bin') ||
+                    url.pathname.includes('_model');
+
+  if (isAIAsset) {
+    event.respondWith(
+      caches.match(event.request).then((cachedResponse) => {
+        if (cachedResponse) return cachedResponse;
+        return fetch(event.request).then((networkResponse) => {
+          const responseClone = networkResponse.clone();
+          caches.open(MODEL_CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseClone);
+          });
+          return networkResponse;
+        });
+      })
+    );
+    return;
+  }
+
+  // 2. Cache-First, Network Fallback for App Shell & UI
   event.respondWith(
     caches.match(event.request).then((response) => {
-      return response || fetch(event.request);
+      return response || fetch(event.request).then((networkResponse) => {
+        if (event.request.method === 'GET' && url.protocol.startsWith('http')) {
+          const responseClone = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseClone);
+          });
+        }
+        return networkResponse;
+      });
+    }).catch(() => {
+      if (event.request.mode === 'navigate') {
+        return caches.match('/');
+      }
     })
   );
 });
 
-// Acknowledge incoming client-side heartbeats if necessary
 self.addEventListener('message', (event: any) => {
   if (event.data && event.data.type === 'HEARTBEAT') {
-    // Optional: Log or process heartbeat from main thread
+    // Keep alive message from main thread
   }
 });
