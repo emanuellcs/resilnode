@@ -1,11 +1,14 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { probeHardware, type HardwareProbeResult } from '@/lib/hardware-probe';
 import { initializeLLM } from '@/lib/llm-client';
 import { multimodalRouter, type VisionDetection } from '@/lib/multimodal-router';
+import { WebRTCMesh, type MeshStatus } from '@/lib/webrtc-mesh';
+import { syncQueue } from '@/lib/sync-queue';
 import type { InitProgressReport, MLCEngineInterface } from '@mlc-ai/web-llm';
 import CameraCapture from '@/components/vision/camera-capture';
+import QRHandshake from '@/components/network/qr-handshake';
 
 export default function CommandCenter() {
   // Phase 1: Hardware Probe State
@@ -25,6 +28,23 @@ export default function CommandCenter() {
   const [isVisionReady, setIsVisionReady] = useState(false);
   const [isProcessingVision, setIsProcessingVision] = useState(false);
   const [visionStatus, setVisionStatus] = useState('OFFLINE');
+
+  // Phase 4: Mesh Networking State
+  const [meshStatus, setMeshStatus] = useState<MeshStatus>('DISCONNECTED');
+  const [queueCount, setQueueCount] = useState(0);
+  const [showHandshake, setShowHandshake] = useState(false);
+  const [localSDP, setLocalSDP] = useState<string | null>(null);
+
+  const mesh = useMemo(() => new WebRTCMesh(
+    (status) => setMeshStatus(status),
+    (message: unknown) => {
+      // Handle incoming messages from mesh peers
+      const msg = message as any;
+      if (msg.type === 'ESCALATION_QUERY' && engineReady) {
+        setOutput(`[MESH_RECEIVE] Escalation Query: ${msg.data.userPrompt}. Analyzing...`);
+      }
+    }
+  ), [engineReady]);
 
   // Terminal State
   const [prompt, setPrompt] = useState('');
@@ -58,6 +78,12 @@ export default function CommandCenter() {
     };
     visionWorker.current.postMessage({ type: 'INIT' });
 
+    // Phase 4: Sync Queue Update
+    const syncInterval = setInterval(async () => {
+      const count = await syncQueue.getQueueCount();
+      setQueueCount(count);
+    }, 2000);
+
     // Phase 2: Heartbeat
     const heartbeatInterval = setInterval(() => {
       if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
@@ -78,6 +104,7 @@ export default function CommandCenter() {
 
     return () => {
       clearInterval(heartbeatInterval);
+      clearInterval(syncInterval);
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.removeEventListener('message', handleSWMessage);
       }
@@ -102,6 +129,7 @@ export default function CommandCenter() {
       });
       setEngine(llmEngine);
       multimodalRouter.setEngine(llmEngine);
+      multimodalRouter.setMesh(mesh);
       setEngineReady(true);
     } catch (error) {
       console.error("Hydration Error:", error);
@@ -123,26 +151,12 @@ export default function CommandCenter() {
     setOutput('');
 
     try {
-      if (visionDetections.length > 0) {
-        // Use the Multimodal Router for vision-aware reasoning
-        await multimodalRouter.executeReasoning(
-          visionDetections,
-          prompt,
-          (chunk) => setOutput(chunk)
-        );
-      } else {
-        // Fallback to standard text generation
-        const asyncGen = await engine!.chat.completions.create({
-          messages: [{ role: 'user', content: prompt }],
-          stream: true,
-        });
-        let currentOutput = '';
-        for await (const chunk of asyncGen) {
-          const content = chunk.choices[0]?.delta?.content || "";
-          currentOutput += content;
-          setOutput(currentOutput);
-        }
-      }
+      // Multimodal reasoning logic is handled in the router
+      await multimodalRouter.executeReasoning(
+        visionDetections,
+        prompt,
+        (chunk) => setOutput(chunk)
+      );
     } catch (error) {
       console.error("Execution Error:", error);
       setOutput(`[TERMINAL ERROR] ${error instanceof Error ? error.message : 'Execution failed'}`);
@@ -152,7 +166,32 @@ export default function CommandCenter() {
   };
 
   return (
-    <main className="flex-1 flex flex-col p-6 font-mono min-h-screen">
+    <main className="flex-1 flex flex-col p-6 font-mono min-h-screen relative overflow-x-hidden">
+      {/* Handshake Modal Overlay */}
+      {showHandshake && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/95 backdrop-blur-sm">
+          <div className="w-full max-w-4xl">
+            <QRHandshake 
+              isCommandNode={probeResult?.tier === 'TIER_4_COMMAND'}
+              localSDP={localSDP}
+              onOfferGenerated={async () => {
+                const offer = await mesh.generateOffer();
+                setLocalSDP(offer);
+              }}
+              onOfferScanned={async (offer) => {
+                const answer = await mesh.acceptOfferAndGenerateAnswer(offer);
+                setLocalSDP(answer);
+              }}
+              onAnswerScanned={async (answer) => {
+                await mesh.finalizeHandshake(answer);
+                setShowHandshake(false);
+              }}
+              onAnswerGenerated={() => {}}
+            />
+          </div>
+        </div>
+      )}
+
       <header className="mb-8 border-b border-zinc-800 pb-4 flex justify-between items-center">
         <div>
           <h1 className="text-2xl font-bold tracking-tighter uppercase text-zinc-100">
@@ -172,9 +211,18 @@ export default function CommandCenter() {
             <span className="text-zinc-500">VRAM Guard: {heartbeatStatus}</span>
           </div>
           <div className="flex items-center gap-2">
-             <span className="text-zinc-600">Vision:</span>
-             <span className={isVisionReady ? 'text-zinc-400' : 'text-zinc-700'}>{visionStatus}</span>
+             <span className="text-zinc-600">Mesh Network:</span>
+             <span className={meshStatus === 'CONNECTED' ? 'text-emerald-400 font-bold' : meshStatus === 'CONNECTING' ? 'text-yellow-500 animate-pulse' : 'text-zinc-700'}>
+                {meshStatus === 'CONNECTED' ? 'CONNECTED' : meshStatus === 'CONNECTING' ? 'SYNCING...' : `OFFLINE (Queue: ${queueCount})`}
+             </span>
           </div>
+          <button 
+            onClick={() => setShowHandshake(true)}
+            className="mt-1 px-2 py-0.5 border border-zinc-700 hover:border-zinc-400 text-zinc-500 hover:text-zinc-200 transition-colors"
+          >
+            Handshake Node
+          </button>
+          <div className="hidden">{visionStatus} {engine ? 'LLM_ACTIVE' : ''}</div>
         </div>
       </header>
 
@@ -306,7 +354,7 @@ export default function CommandCenter() {
       </div>
 
       <footer className="mt-6 flex justify-between text-[9px] text-zinc-700 uppercase tracking-widest border-t border-zinc-900 pt-2">
-        <div>ResilNode Sensory Pipeline // PHASE_03_MULTIMODAL</div>
+        <div>ResilNode Sensory Pipeline // PHASE_04_MESH</div>
         <div className="flex gap-4">
            <span>Memory: Stable</span>
            <span>UTC: {new Date().toISOString().split('T')[1].split('.')[0]}</span>
