@@ -7,8 +7,15 @@ export function chunkText(
   chunkSize: number = 500,
   overlap: number = 50,
 ): string[] {
-  // Simple word-based chunking for demonstration.
-  // In production, token-based chunking is preferred.
+  if (chunkSize <= 0) {
+    throw new RangeError("chunkSize must be greater than zero.");
+  }
+  if (overlap < 0 || overlap >= chunkSize) {
+    throw new RangeError(
+      "overlap must be non-negative and smaller than chunkSize.",
+    );
+  }
+
   const words = text.split(/\s+/);
   const chunks: string[] = [];
 
@@ -17,15 +24,13 @@ export function chunkText(
     if (chunk.trim()) {
       chunks.push(chunk);
     }
-    // Avoid infinite loop if chunkSize <= overlap
-    if (chunkSize <= overlap) break;
   }
 
   return chunks;
 }
 
 /**
- * Mock datasets for simulated pre-caching.
+ * Built-in sample datasets for local RAG smoke testing.
  */
 export const CRISIS_DATASETS = [
   {

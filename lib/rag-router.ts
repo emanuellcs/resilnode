@@ -15,9 +15,14 @@ export class RAGRouter {
   private engine: MLCEngineInterface | null = null;
   private embeddingWorker: Worker | null = null;
   private logCallback: (log: RAGLog) => void = () => {};
+  private workerTimeoutMs = 30000;
 
   setEngine(engine: MLCEngineInterface) {
     this.engine = engine;
+  }
+
+  clearEngine() {
+    this.engine = null;
   }
 
   setEmbeddingWorker(worker: Worker) {
@@ -46,7 +51,7 @@ export class RAGRouter {
     this.log("🔍 Vectorizing situational query...");
 
     // 1. Get Query Embedding from Worker
-    const queryEmbedding = await this.getQueryEmbedding(query);
+    const queryEmbedding = await this.embedText(query);
     this.log("✅ Embedding generated locally.", "SUCCESS");
 
     // 2. Search Local Vector Store
@@ -98,23 +103,42 @@ export class RAGRouter {
   /**
    * Helper to wrap Web Worker message in a Promise.
    */
-  private getQueryEmbedding(text: string): Promise<number[]> {
+  embedText(text: string): Promise<number[]> {
     return new Promise((resolve, reject) => {
+      if (!this.embeddingWorker) {
+        reject(new Error("Embedding Worker not initialized."));
+        return;
+      }
+
+      const requestId = crypto.randomUUID();
+      const cleanup = () => {
+        clearTimeout(timeout);
+        this.embeddingWorker?.removeEventListener("message", handler);
+      };
+
       const handler = (event: MessageEvent) => {
-        const { type, payload, message } = event.data;
+        const { type, payload, message, requestId: responseId } = event.data;
+        if (responseId !== requestId) return;
+
         if (type === "RESULT") {
-          this.embeddingWorker?.removeEventListener("message", handler);
+          cleanup();
           resolve(payload);
         } else if (type === "ERROR") {
-          this.embeddingWorker?.removeEventListener("message", handler);
+          cleanup();
           reject(new Error(message));
         }
       };
 
-      this.embeddingWorker?.addEventListener("message", handler);
-      this.embeddingWorker?.postMessage({
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("Embedding Worker request timed out."));
+      }, this.workerTimeoutMs);
+
+      this.embeddingWorker.addEventListener("message", handler);
+      this.embeddingWorker.postMessage({
         type: "GENERATE_EMBEDDING",
         payload: text,
+        requestId,
       });
     });
   }

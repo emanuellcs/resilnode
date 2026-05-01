@@ -30,6 +30,10 @@ export default function CommandCenter() {
     useState<InitProgressReport | null>(null);
   const [engineReady, setEngineReady] = useState(false);
   const [engine, setEngine] = useState<MLCEngineInterface | null>(null);
+  const engineRef = useRef<MLCEngineInterface | null>(null);
+  const engineReadyRef = useRef(false);
+  const [activeModelId, setActiveModelId] = useState("UNLOADED");
+  const [modelNotice, setModelNotice] = useState<string | null>(null);
   const [isHydrating, setIsHydrating] = useState(false);
   const [heartbeatStatus, setHeartbeatStatus] = useState<"IDLE" | "PROTECTED">(
     "IDLE",
@@ -57,14 +61,14 @@ export default function CommandCenter() {
         (status) => setMeshStatus(status),
         (message: unknown) => {
           const msg = message as { type: string; data: unknown };
-          if (msg.type === "ESCALATION_QUERY" && engineReady) {
+          if (msg.type === "ESCALATION_QUERY" && engineReadyRef.current) {
             setOutput(
-              `[MESH_INBOUND] Escalation request received. Processing via 26B MoE RAG pipeline...`,
+              `[MESH_INBOUND] Escalation request received. Processing via local RAG pipeline...`,
             );
           }
         },
       ),
-    [engineReady],
+    [],
   );
 
   // Phase 5: RAG & Vector State
@@ -83,6 +87,10 @@ export default function CommandCenter() {
   const [prompt, setPrompt] = useState("");
   const [output, setOutput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
+
+  useEffect(() => {
+    engineReadyRef.current = engineReady;
+  }, [engineReady]);
 
   useEffect(() => {
     // Phase 1: Probe
@@ -172,6 +180,12 @@ export default function CommandCenter() {
       }
       visionWorker.current?.terminate();
       embeddingWorker.current?.terminate();
+      mesh.close();
+      multimodalRouter.clearEngine();
+      ragRouter.clearEngine();
+      void engineRef.current?.unload().catch((error) => {
+        console.error("Runtime unload failed:", error);
+      });
     };
   }, [mesh]);
 
@@ -179,25 +193,54 @@ export default function CommandCenter() {
     if (!probeResult) return;
     setIsHydrating(true);
     try {
-      const llmEngine = await initializeLLM(probeResult.tier, (report) => {
+      const initialization = await initializeLLM(probeResult.tier, (report) => {
         setLoadingProgress(report);
         if (report.text.includes("Loading weights")) {
-          // Mock VRAM estimation based on progress
           const est =
-            (probeResult.tier === "TIER_4_COMMAND" ? 14.5 : 1.8) *
+            (probeResult.tier === "TIER_4_COMMAND" ? 3.2 : 2.7) *
             (report.progress || 0.1);
           setVramEst(`${est.toFixed(2)} GB`);
         }
       });
-      setEngine(llmEngine);
-      multimodalRouter.setEngine(llmEngine);
-      ragRouter.setEngine(llmEngine);
+      engineRef.current = initialization.engine;
+      setEngine(initialization.engine);
+      setActiveModelId(initialization.modelId);
+      setModelNotice(initialization.fallbackReason ?? null);
+      multimodalRouter.setEngine(initialization.engine);
+      ragRouter.setEngine(initialization.engine);
       setEngineReady(true);
     } catch (error) {
       console.error("Hydration Error:", error);
-      setOutput(`[FATAL] Hydration failed.`);
+      setOutput(
+        `[FATAL] Hydration failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
     } finally {
       setIsHydrating(false);
+    }
+  };
+
+  const handleRuntimeReset = async () => {
+    if (!engine) return;
+    setIsGenerating(false);
+    setEngineReady(false);
+    try {
+      engine.interruptGenerate();
+      await engine.unload();
+      (globalThis as { gc?: () => void }).gc?.();
+      setOutput("[RUNTIME] WebLLM engine unloaded and memory guard invoked.");
+    } catch (error) {
+      setOutput(
+        `[RUNTIME] Reset failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    } finally {
+      engineRef.current = null;
+      setEngine(null);
+      setActiveModelId("UNLOADED");
+      setModelNotice(null);
+      setEngineReady(false);
+      setVramEst("0.00 GB");
+      multimodalRouter.clearEngine();
+      ragRouter.clearEngine();
     }
   };
 
@@ -238,7 +281,7 @@ export default function CommandCenter() {
   };
 
   return (
-    <main className="flex-1 flex flex-col p-6 font-mono min-h-screen relative overflow-x-hidden bg-zinc-950 text-zinc-100">
+    <main className="flex-1 flex flex-col p-4 sm:p-6 font-mono min-h-screen relative overflow-x-hidden bg-zinc-950 text-zinc-100">
       <TelemetryOverlay
         vramUsage={vramEst}
         ttft={ttft}
@@ -272,18 +315,18 @@ export default function CommandCenter() {
         </div>
       )}
 
-      <header className="mb-8 border-b border-zinc-800 pb-4 flex justify-between items-start">
+      <header className="mb-8 border-b border-zinc-800 pb-4 flex flex-col gap-4 sm:flex-row sm:justify-between sm:items-start">
         <div className="space-y-1">
-          <h1 className="text-3xl font-black tracking-tighter uppercase inline-flex items-center gap-3">
+          <h1 className="text-2xl sm:text-3xl font-black tracking-tighter uppercase inline-flex flex-wrap items-center gap-3">
             <span className="bg-white text-zinc-950 px-2">ResilNode</span>
-            <span className="text-zinc-500">v1.0.0-PROTOTYPE</span>
+            <span className="text-zinc-500">v1.0.0-RC</span>
           </h1>
           <p className="text-[10px] text-zinc-500 uppercase tracking-[0.3em]">
             Zero-Connectivity AI Command Center // Sector 7G
           </p>
         </div>
 
-        <div className="flex flex-col items-end gap-2">
+        <div className="flex flex-col items-start sm:items-end gap-2">
           <div className="flex gap-4">
             <div className="flex flex-col items-end">
               <span className="text-[8px] text-zinc-600 uppercase font-black">
@@ -349,16 +392,22 @@ export default function CommandCenter() {
               <button
                 onClick={async () => {
                   setIsIndexing(true);
-                  for (const dataset of CRISIS_DATASETS) {
-                    const chunks = chunkText(dataset.content);
-                    for (const chunk of chunks) {
-                      await ragRouter["getQueryEmbedding"](chunk).then((emb) =>
-                        vectorStore.addDocument(chunk, emb),
-                      );
+                  try {
+                    for (const dataset of CRISIS_DATASETS) {
+                      const chunks = chunkText(dataset.content);
+                      for (const chunk of chunks) {
+                        const embedding = await ragRouter.embedText(chunk);
+                        await vectorStore.addDocument(chunk, embedding);
+                      }
                     }
+                    setDbDocCount(await vectorStore.getDocumentCount());
+                  } catch (error) {
+                    setOutput(
+                      `[RAG] Indexing failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    );
+                  } finally {
+                    setIsIndexing(false);
                   }
-                  setDbDocCount(await vectorStore.getDocumentCount());
-                  setIsIndexing(false);
                 }}
                 disabled={isIndexing}
                 className="w-full py-2 border border-dashed border-zinc-700 hover:border-zinc-400 text-zinc-600 hover:text-zinc-200 text-[10px] font-bold uppercase transition-all"
@@ -370,18 +419,53 @@ export default function CommandCenter() {
 
           <div className="mt-auto">
             {!engineReady ? (
-              <button
-                onClick={handleHydrate}
-                disabled={isHydrating}
-                className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-black uppercase text-xs tracking-[0.2em] shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all disabled:opacity-50"
-              >
-                {isHydrating ? "Allocating VRAM..." : "Engage AI Runtime"}
-              </button>
+              <div className="space-y-3">
+                <button
+                  onClick={handleHydrate}
+                  disabled={
+                    isHydrating || isProbing || !probeResult?.gpuSupported
+                  }
+                  className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-black uppercase text-xs tracking-[0.2em] shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all disabled:opacity-50 disabled:shadow-none"
+                >
+                  {isProbing
+                    ? "Probing Hardware..."
+                    : isHydrating
+                      ? "Allocating VRAM..."
+                      : probeResult?.gpuSupported
+                        ? "Engage AI Runtime"
+                        : "WebGPU Unavailable"}
+                </button>
+                {loadingProgress && (
+                  <p className="text-[9px] text-zinc-500 uppercase leading-relaxed">
+                    {Math.round((loadingProgress.progress || 0) * 100)}% ::{" "}
+                    {loadingProgress.text}
+                  </p>
+                )}
+                {probeResult?.error && (
+                  <p className="text-[9px] text-red-400 uppercase leading-relaxed">
+                    {probeResult.error}
+                  </p>
+                )}
+              </div>
             ) : (
-              <div className="p-4 border-2 border-emerald-500/20 bg-emerald-500/5 text-center">
-                <span className="text-emerald-500 font-black uppercase text-xs tracking-widest animate-pulse">
+              <div className="p-4 border-2 border-emerald-500/20 bg-emerald-500/5 text-center space-y-3">
+                <div className="text-emerald-500 font-black uppercase text-xs tracking-widest animate-pulse">
                   Neural Grid Online
-                </span>
+                </div>
+                <div className="text-[9px] text-zinc-500 uppercase break-all">
+                  Model: {activeModelId}
+                </div>
+                {modelNotice && (
+                  <p className="text-[9px] text-amber-400 uppercase leading-relaxed">
+                    {modelNotice}
+                  </p>
+                )}
+                <button
+                  onClick={handleRuntimeReset}
+                  className="w-full py-2 border border-emerald-700/50 text-emerald-400 hover:border-emerald-400 text-[10px] font-bold uppercase transition-all"
+                >
+                  Reset Runtime
+                </button>
               </div>
             )}
           </div>
@@ -392,7 +476,7 @@ export default function CommandCenter() {
           className={`lg:col-span-2 flex flex-col border border-zinc-800 bg-zinc-950 shadow-2xl relative transition-opacity ${!engineReady && "opacity-40 pointer-events-none"}`}
         >
           <div className="absolute top-0 right-0 p-2 text-[8px] text-zinc-800 uppercase font-black">
-            Runtime: {probeResult?.tier} {"//"} {vramEst}
+            Runtime: {probeResult?.tier} {"//"} {activeModelId} {"//"} {vramEst}
           </div>
 
           <div className="bg-zinc-900/50 border-b border-zinc-800 p-3 flex items-center justify-between">
@@ -432,6 +516,23 @@ export default function CommandCenter() {
           </div>
 
           <div className="p-6 bg-zinc-900/30 border-t border-zinc-800">
+            {(ragLogs.length > 0 || visionStatus || embeddingStatus) && (
+              <div className="mb-4 grid grid-cols-1 sm:grid-cols-3 gap-2 text-[9px] uppercase">
+                <div className="text-zinc-600 truncate">
+                  Vision: <span className="text-zinc-400">{visionStatus}</span>
+                </div>
+                <div className="text-zinc-600 truncate">
+                  Embed:{" "}
+                  <span className="text-zinc-400">{embeddingStatus}</span>
+                </div>
+                <div className="text-zinc-600 truncate">
+                  RAG:{" "}
+                  <span className="text-zinc-400">
+                    {ragLogs[0]?.message ?? "IDLE"}
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="flex flex-col gap-4">
               <textarea
                 value={prompt}
@@ -453,11 +554,11 @@ export default function CommandCenter() {
         </section>
       </div>
 
-      <footer className="mt-6 flex justify-between text-[9px] text-zinc-700 uppercase tracking-[0.2em] border-t border-zinc-900 pt-4 font-black">
+      <footer className="mt-6 flex flex-col sm:flex-row gap-3 sm:justify-between text-[9px] text-zinc-700 uppercase tracking-[0.2em] border-t border-zinc-900 pt-4 font-black">
         <div>
           ResilNode :: Zero-Signal Mesh Collective {"//"} Phase 06 Finish
         </div>
-        <div className="flex gap-6">
+        <div className="flex flex-wrap gap-3 sm:gap-6">
           <span>Memory Guard: Active</span>
           <span>Heartbeat: {heartbeatStatus}</span>
           <span>

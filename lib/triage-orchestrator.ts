@@ -17,6 +17,7 @@ export class TriageOrchestrator {
   private tier: DeviceTier = "TIER_1_EDGE";
   private visionWorker: Worker | null = null;
   private mesh: WebRTCMesh | null = null;
+  private workerTimeoutMs = 30000;
 
   setTier(tier: DeviceTier) {
     this.tier = tier;
@@ -35,7 +36,7 @@ export class TriageOrchestrator {
    */
   async executeTriage(
     imageBlob: Blob | null,
-    audioTranscript: string,
+    situationText: string,
     onStream: (chunk: string) => void,
   ): Promise<TriageResult> {
     let detections: VisionDetection[] = [];
@@ -49,19 +50,22 @@ export class TriageOrchestrator {
     // 2. Logic: Should we escalate?
     // If we are EDGE tier and have complex query or low vision confidence, escalate.
     const isComplex =
-      audioTranscript.toLowerCase().includes("structural") ||
-      audioTranscript.toLowerCase().includes("calculate");
+      situationText.toLowerCase().includes("structural") ||
+      situationText.toLowerCase().includes("calculate");
 
     if (this.tier === "TIER_1_EDGE" && isComplex) {
       escalated = true;
       const payload = {
         type: "ESCALATION_QUERY" as const,
-        data: { detections, userPrompt: audioTranscript },
+        data: { detections, userPrompt: situationText },
         timestamp: Date.now(),
       };
 
-      if (this.mesh && !this.mesh.isDisconnected()) {
-        this.mesh.sendMessage(payload);
+      if (
+        this.mesh &&
+        !this.mesh.isDisconnected() &&
+        this.mesh.sendMessage(payload)
+      ) {
         onStream(
           "[MESH] Transmitting situational data to COMMAND NODE via local mesh...",
         );
@@ -76,14 +80,14 @@ export class TriageOrchestrator {
     if (this.tier === "TIER_4_COMMAND") {
       // Command nodes use RAG
       response = await ragRouter.executeRAGQuery(
-        `Visual Context: ${detections.map((d) => d.label).join(", ")}. Query: ${audioTranscript}`,
+        `Visual Context: ${detections.map((d) => d.label).join(", ")}. Query: ${situationText}`,
         onStream,
       );
     } else {
       // Edge nodes use direct multimodal routing
       response = await multimodalRouter.executeReasoning(
         detections,
-        audioTranscript,
+        situationText,
         onStream,
       );
     }
@@ -94,20 +98,37 @@ export class TriageOrchestrator {
   private getVisionDetections(blob: Blob): Promise<VisionDetection[]> {
     return new Promise((resolve, reject) => {
       if (!this.visionWorker) return resolve([]);
+      const requestId = crypto.randomUUID();
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        this.visionWorker?.removeEventListener("message", handler);
+      };
 
       const handler = (event: MessageEvent) => {
-        const { type, payload, message } = event.data;
+        const { type, payload, message, requestId: responseId } = event.data;
+        if (responseId !== requestId) return;
+
         if (type === "RESULT") {
-          this.visionWorker?.removeEventListener("message", handler);
+          cleanup();
           resolve(payload);
         } else if (type === "ERROR") {
-          this.visionWorker?.removeEventListener("message", handler);
+          cleanup();
           reject(new Error(message));
         }
       };
 
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("Vision Worker request timed out."));
+      }, this.workerTimeoutMs);
+
       this.visionWorker.addEventListener("message", handler);
-      this.visionWorker.postMessage({ type: "PROCESS_IMAGE", payload: blob });
+      this.visionWorker.postMessage({
+        type: "PROCESS_IMAGE",
+        payload: blob,
+        requestId,
+      });
     });
   }
 }

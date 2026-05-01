@@ -4,60 +4,100 @@ import { pipeline, env } from "@huggingface/transformers";
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
-let extractor: any = null;
+type FeatureExtractor = (
+  input: string,
+  options: { pooling: "mean"; normalize: boolean },
+) => Promise<{ data: ArrayLike<number> }>;
+
+let extractor: FeatureExtractor | null = null;
+let initPromise: Promise<void> | null = null;
+
+interface WorkerRequest {
+  type: "INIT" | "GENERATE_EMBEDDING";
+  payload?: string;
+  requestId?: string;
+}
+
+function postError(message: string, requestId?: string) {
+  self.postMessage({
+    type: "ERROR",
+    message,
+    requestId,
+  });
+}
 
 /**
  * Initialize the embedding model.
  */
-async function init() {
+async function init(): Promise<void> {
   if (extractor) return;
-  try {
-    // Xenova/all-MiniLM-L6-v2 is standard, lightweight, and fast for edge embeddings.
-    extractor = await pipeline(
-      "feature-extraction",
-      "Xenova/all-MiniLM-L6-v2",
-      {
-        device: "wasm",
-      },
-    );
-    self.postMessage({
-      type: "STATUS",
-      message: "Embedding Engine Online (MiniLM-L6-v2)",
-    });
-  } catch (error) {
-    self.postMessage({
-      type: "ERROR",
-      message: `Embedding Init Failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-    });
-  }
+  if (initPromise) return initPromise;
+
+  initPromise = (async () => {
+    try {
+      extractor = (await pipeline(
+        "feature-extraction",
+        "Xenova/all-MiniLM-L6-v2",
+        {
+          device: "wasm",
+        },
+      )) as unknown as FeatureExtractor;
+      self.postMessage({
+        type: "STATUS",
+        message: "Embedding Engine Online (MiniLM-L6-v2)",
+      });
+    } catch (error) {
+      extractor = null;
+      initPromise = null;
+      throw error;
+    }
+  })();
+
+  return initPromise;
 }
 
 self.onmessage = async (event) => {
-  const { type, payload } = event.data;
+  const { type, payload, requestId } = event.data as WorkerRequest;
 
   if (type === "INIT") {
-    await init();
+    try {
+      await init();
+    } catch (error) {
+      postError(
+        `Embedding Init Failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        requestId,
+      );
+    }
     return;
   }
 
-  if (type === "GENERATE_EMBEDDING" && extractor) {
+  if (type === "GENERATE_EMBEDDING") {
+    if (!payload) {
+      postError("Embedding Generation Error: missing text payload.", requestId);
+      return;
+    }
+
     try {
-      // payload is the text string
+      await init();
+      if (!extractor) throw new Error("Embedding pipeline unavailable.");
       const result = await extractor(payload, {
         pooling: "mean",
         normalize: true,
       });
-      // result.data is the Float32Array embedding
       self.postMessage({
         type: "RESULT",
         payload: Array.from(result.data),
         text: payload,
+        requestId,
       });
     } catch (error) {
-      self.postMessage({
-        type: "ERROR",
-        message: `Embedding Generation Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-      });
+      postError(
+        `Embedding Generation Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+        requestId,
+      );
     }
+    return;
   }
+
+  postError(`Unknown Embedding Worker message: ${type}`, requestId);
 };

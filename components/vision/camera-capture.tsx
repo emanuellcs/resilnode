@@ -1,5 +1,6 @@
 "use client";
 
+import type { ChangeEvent } from "react";
 import { useRef, useState, useEffect, useCallback } from "react";
 
 interface CameraCaptureProps {
@@ -19,6 +20,11 @@ export default function CameraCapture({
 
   const startCamera = useCallback(async () => {
     setError(null);
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("Camera API unavailable. Upload an image instead.");
+      return;
+    }
+
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" }, // Target the rear camera
@@ -63,6 +69,12 @@ export default function CameraCapture({
     }
   };
 
+  const handleFileCapture = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) onCapture(file);
+    event.target.value = "";
+  };
+
   useEffect(() => {
     return () => {
       if (stream) {
@@ -81,6 +93,16 @@ export default function CameraCapture({
           >
             Activate Optical Intake
           </button>
+          <label className="px-6 py-2 border border-zinc-700 text-zinc-300 hover:border-zinc-400 hover:text-zinc-100 font-bold uppercase text-xs tracking-widest transition-all cursor-pointer">
+            Upload Still Image
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={handleFileCapture}
+              className="hidden"
+            />
+          </label>
           {error && (
             <p className="text-[10px] text-red-500 uppercase px-4 text-center">
               {error}
@@ -105,11 +127,11 @@ export default function CameraCapture({
             </span>
           </div>
 
-          <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity px-3">
             <button
               onClick={captureFrame}
               disabled={isProcessing}
-              className="px-8 py-3 bg-white text-zinc-950 font-black uppercase text-[10px] tracking-widest hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(255,255,255,0.3)] disabled:opacity-50"
+              className="px-5 sm:px-8 py-3 bg-white text-zinc-950 font-black uppercase text-[10px] tracking-widest hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(255,255,255,0.3)] disabled:opacity-50"
             >
               Capture Context
             </button>

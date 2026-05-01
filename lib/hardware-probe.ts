@@ -1,3 +1,5 @@
+import { GEMMA_4_E2B_MODEL_ID, GEMMA_4_E4B_MODEL_ID } from "./model-catalog";
+
 export type DeviceTier = "TIER_1_EDGE" | "TIER_4_COMMAND";
 
 export interface HardwareProbeResult {
@@ -7,6 +9,42 @@ export interface HardwareProbeResult {
   maxStorageBufferBindingSize: number;
   gpuSupported: boolean;
   error?: string;
+}
+
+export interface ModelSelection {
+  requestedModelId: string;
+  modelId: string;
+  fallbackReason?: string;
+}
+
+interface GPUAdapterWithInfo extends GPUAdapter {
+  requestAdapterInfo?: () => Promise<GPUAdapterInfo>;
+}
+
+export const HIGH_TIER_STORAGE_BUFFER_BYTES = 1024 * 1024 * 1024;
+
+export function classifyDeviceTier(
+  maxStorageBufferBindingSize: number,
+): DeviceTier {
+  return maxStorageBufferBindingSize >= HIGH_TIER_STORAGE_BUFFER_BYTES
+    ? "TIER_4_COMMAND"
+    : "TIER_1_EDGE";
+}
+
+export function selectModelForTier(tier: DeviceTier): ModelSelection {
+  if (tier === "TIER_4_COMMAND") {
+    return {
+      requestedModelId: GEMMA_4_E4B_MODEL_ID,
+      modelId: GEMMA_4_E2B_MODEL_ID,
+      fallbackReason:
+        "Gemma 4 E4B is the high-tier target, but no verified MLC/WebLLM artifact is available. Falling back to validated Gemma 4 E2B.",
+    };
+  }
+
+  return {
+    requestedModelId: GEMMA_4_E2B_MODEL_ID,
+    modelId: GEMMA_4_E2B_MODEL_ID,
+  };
 }
 
 /**
@@ -26,7 +64,8 @@ export async function probeHardware(): Promise<HardwareProbeResult> {
   }
 
   try {
-    const adapter = await navigator.gpu.requestAdapter();
+    const adapter =
+      (await navigator.gpu.requestAdapter()) as GPUAdapterWithInfo | null;
     if (!adapter) {
       throw new Error("No appropriate GPU adapter found.");
     }
@@ -53,22 +92,14 @@ export async function probeHardware(): Promise<HardwareProbeResult> {
       requiredLimits,
     });
 
-    const info =
-      (adapter as any).info ||
-      (await (adapter as any).requestAdapterInfo?.()) ||
-      null;
+    const info = adapter.info || (await adapter.requestAdapterInfo?.()) || null;
 
     const maxBufferSize = device.limits.maxBufferSize;
     const maxStorageBufferBindingSize =
       device.limits.maxStorageBufferBindingSize;
 
-    // Classification Logic:
-    // TIER_4_COMMAND requires significant storage buffer binding (typically > 1GB for MoE)
-    // and ideally a discrete GPU (not strictly checkable but we can infer from limits).
-    const isHighTier = maxStorageBufferBindingSize >= 1024 * 1024 * 1024; // >= 1GB as threshold
-
     return {
-      tier: isHighTier ? "TIER_4_COMMAND" : "TIER_1_EDGE",
+      tier: classifyDeviceTier(maxStorageBufferBindingSize),
       adapterInfo: info,
       maxBufferSize,
       maxStorageBufferBindingSize,

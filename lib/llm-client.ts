@@ -3,7 +3,15 @@ import {
   InitProgressReport,
   MLCEngineInterface,
 } from "@mlc-ai/web-llm";
-import { DeviceTier } from "./hardware-probe";
+import { DeviceTier, selectModelForTier } from "./hardware-probe";
+import { webLLMAppConfig } from "./model-catalog";
+
+export interface LLMInitialization {
+  engine: MLCEngineInterface;
+  modelId: string;
+  requestedModelId: string;
+  fallbackReason?: string;
+}
 
 /**
  * Initializes the WebLLM engine within a Service Worker.
@@ -12,17 +20,23 @@ import { DeviceTier } from "./hardware-probe";
 export async function initializeLLM(
   tier: DeviceTier,
   progressCallback: (report: InitProgressReport) => void,
-): Promise<MLCEngineInterface> {
-  const modelId =
-    tier === "TIER_4_COMMAND"
-      ? "gemma-4-26b-moe-q4f16_1-MLC"
-      : "gemma-4-e2b-q4f16_1-MLC";
+): Promise<LLMInitialization> {
+  const selection = selectModelForTier(tier);
 
-  // Note: These model IDs are conceptual for the hackathon context.
-  // We assume the service worker is already registered and controlling the page.
-  const engine = await CreateServiceWorkerMLCEngine(modelId, {
-    initProgressCallback: progressCallback,
-  });
+  const engine = await CreateServiceWorkerMLCEngine(
+    selection.modelId,
+    {
+      appConfig: webLLMAppConfig,
+      initProgressCallback: progressCallback,
+    },
+    undefined,
+    5000,
+  );
 
-  return engine;
+  return {
+    engine,
+    modelId: selection.modelId,
+    requestedModelId: selection.requestedModelId,
+    fallbackReason: selection.fallbackReason,
+  };
 }

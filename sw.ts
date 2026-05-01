@@ -5,6 +5,14 @@ const CACHE_NAME = "resilnode-app-shell-v1";
 const MODEL_CACHE_NAME = "resilnode-models-v1";
 const ASSETS_TO_CACHE = ["/", "/manifest.json", "/favicon.ico"];
 
+function heartbeatAck() {
+  return {
+    type: "HEARTBEAT_ACK",
+    timestamp: Date.now(),
+    status: "VRAM_PROTECTED",
+  };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 let handler: ServiceWorkerMLCEngineHandler | null = null;
 
@@ -33,11 +41,7 @@ self.addEventListener("activate", (event: any) => {
   setInterval(() => {
     (self as any).clients.matchAll().then((clients: any[]) => {
       clients.forEach((client) => {
-        client.postMessage({
-          type: "HEARTBEAT_ACK",
-          timestamp: Date.now(),
-          status: "VRAM_PROTECTED",
-        });
+        client.postMessage(heartbeatAck());
       });
     });
   }, 5000);
@@ -60,10 +64,12 @@ self.addEventListener("fetch", (event: any) => {
       caches.match(event.request).then((cachedResponse) => {
         if (cachedResponse) return cachedResponse;
         return fetch(event.request).then((networkResponse) => {
-          const responseClone = networkResponse.clone();
-          caches.open(MODEL_CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseClone);
-          });
+          if (networkResponse.ok || networkResponse.type === "opaque") {
+            const responseClone = networkResponse.clone();
+            caches.open(MODEL_CACHE_NAME).then((cache) => {
+              cache.put(event.request, responseClone);
+            });
+          }
           return networkResponse;
         });
       }),
@@ -81,7 +87,8 @@ self.addEventListener("fetch", (event: any) => {
           fetch(event.request).then((networkResponse) => {
             if (
               event.request.method === "GET" &&
-              url.protocol.startsWith("http")
+              url.protocol.startsWith("http") &&
+              (networkResponse.ok || networkResponse.type === "opaque")
             ) {
               const responseClone = networkResponse.clone();
               caches.open(CACHE_NAME).then((cache) => {
@@ -102,6 +109,6 @@ self.addEventListener("fetch", (event: any) => {
 
 self.addEventListener("message", (event: any) => {
   if (event.data && event.data.type === "HEARTBEAT") {
-    // Keep alive message from main thread
+    event.source?.postMessage(heartbeatAck());
   }
 });

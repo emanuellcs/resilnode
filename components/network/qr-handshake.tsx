@@ -5,10 +5,10 @@ import { QRCodeSVG } from "qrcode.react";
 import { Html5QrcodeScanner } from "html5-qrcode";
 
 interface QRHandshakeProps {
-  onOfferGenerated: (offer: string) => void;
-  onAnswerGenerated: (answer: string) => void;
-  onAnswerScanned: (answer: string) => void;
-  onOfferScanned: (offer: string) => void;
+  onOfferGenerated: (offer: string) => void | Promise<void>;
+  onAnswerGenerated: (answer: string) => void | Promise<void>;
+  onAnswerScanned: (answer: string) => void | Promise<void>;
+  onOfferScanned: (offer: string) => void | Promise<void>;
   isCommandNode: boolean;
   localSDP?: string | null;
 }
@@ -21,6 +21,7 @@ export default function QRHandshake({
   localSDP,
 }: QRHandshakeProps) {
   const [isScanning, setIsScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const scannerRef = useRef<Html5QrcodeScanner | null>(null);
 
   const stopScanning = useCallback(() => {
@@ -40,17 +41,21 @@ export default function QRHandshake({
       );
 
       scannerRef.current.render(
-        (decodedText) => {
-          if (isCommandNode) {
-            onAnswerScanned(decodedText);
-          } else {
-            onOfferScanned(decodedText);
+        async (decodedText) => {
+          try {
+            if (isCommandNode) {
+              await onAnswerScanned(decodedText);
+            } else {
+              await onOfferScanned(decodedText);
+            }
+            stopScanning();
+          } catch (error) {
+            setScanError(
+              error instanceof Error ? error.message : "QR scan failed.",
+            );
           }
-          stopScanning();
         },
-        (_error) => {
-          // Silent warning
-        },
+        () => undefined,
       );
     }
 
@@ -68,7 +73,8 @@ export default function QRHandshake({
   ]);
 
   const generateOffer = async () => {
-    onOfferGenerated("");
+    setScanError(null);
+    await onOfferGenerated("");
   };
 
   return (
@@ -114,6 +120,11 @@ export default function QRHandshake({
           >
             Generate {isCommandNode ? "Offer" : "Answer"}
           </button>
+          {scanError && (
+            <p className="text-[9px] text-red-400 uppercase text-center leading-relaxed max-w-[260px]">
+              {scanError}
+            </p>
+          )}
         </div>
 
         <div className="flex flex-col items-center space-y-4">
