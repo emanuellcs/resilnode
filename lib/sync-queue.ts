@@ -13,23 +13,25 @@ const STORE_NAME = "delta-queue";
 export class SyncQueue {
   private db: Promise<IDBPDatabase> | null = null;
 
-  constructor() {
-    if (typeof window !== "undefined") {
-      this.db = openDB(DB_NAME, 1, {
+  constructor(dbName: string = DB_NAME) {
+    if (typeof indexedDB !== "undefined") {
+      this.db = openDB(dbName, 1, {
         upgrade(db) {
-          db.createObjectStore(STORE_NAME, {
-            keyPath: "id",
-            autoIncrement: true,
-          });
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            db.createObjectStore(STORE_NAME, {
+              keyPath: "id",
+              autoIncrement: true,
+            });
+          }
         },
       });
     }
   }
 
-  async enqueuePayload(payload: Omit<SyncPayload, "id">) {
+  async enqueuePayload(payload: Omit<SyncPayload, "id">): Promise<number> {
     if (!this.db) throw new Error("SyncQueue not initialized on client.");
     const db = await this.db;
-    await db.add(STORE_NAME, payload);
+    return db.add(STORE_NAME, payload) as Promise<number>;
   }
 
   async getQueueCount(): Promise<number> {
@@ -44,27 +46,38 @@ export class SyncQueue {
     return db.getAll(STORE_NAME);
   }
 
-  async dequeuePayload(id: number) {
+  async dequeuePayload(id: number): Promise<void> {
     if (!this.db) return;
     const db = await this.db;
     await db.delete(STORE_NAME, id);
   }
 
-  async flushQueue(dataChannel: RTCDataChannel) {
-    if (dataChannel.readyState !== "open") return;
+  async clear(): Promise<void> {
+    if (!this.db) return;
+    const db = await this.db;
+    await db.clear(STORE_NAME);
+  }
+
+  async flushQueue(dataChannel: Pick<RTCDataChannel, "readyState" | "send">) {
+    if (dataChannel.readyState !== "open") return 0;
 
     const payloads = await this.getAllPayloads();
+    let flushed = 0;
+
     for (const payload of payloads) {
       try {
         dataChannel.send(JSON.stringify(payload));
         if (payload.id !== undefined) {
           await this.dequeuePayload(payload.id);
+          flushed++;
         }
       } catch (error) {
         console.error("[SyncQueue] Failed to flush payload:", error);
         break;
       }
     }
+
+    return flushed;
   }
 }
 

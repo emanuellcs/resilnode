@@ -17,6 +17,10 @@ export function cosineSimilarity(
   vecA: number[] | Float32Array,
   vecB: number[] | Float32Array,
 ): number {
+  if (vecA.length !== vecB.length) {
+    throw new RangeError("Vectors must have the same dimensions.");
+  }
+
   let dotProduct = 0;
   let normA = 0;
   let normB = 0;
@@ -34,14 +38,14 @@ export function cosineSimilarity(
 export class VectorStore {
   private dbPromise: Promise<IDBPDatabase> | null = null;
 
-  constructor() {
-    if (typeof window !== "undefined") {
-      this.dbPromise = this.initialize();
+  constructor(dbName: string = DB_NAME) {
+    if (typeof indexedDB !== "undefined") {
+      this.dbPromise = this.initialize(dbName);
     }
   }
 
-  private async initialize(): Promise<IDBPDatabase> {
-    return openDB(DB_NAME, 1, {
+  private async initialize(dbName: string): Promise<IDBPDatabase> {
+    return openDB(dbName, 1, {
       upgrade(db) {
         if (!db.objectStoreNames.contains(STORE_NAME)) {
           db.createObjectStore(STORE_NAME, {

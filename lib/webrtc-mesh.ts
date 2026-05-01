@@ -2,6 +2,11 @@ import { syncQueue } from "./sync-queue";
 
 export type MeshStatus = "DISCONNECTED" | "CONNECTING" | "CONNECTED";
 
+interface EncodedSessionDescription {
+  type: RTCSdpType;
+  sdp: string;
+}
+
 export class WebRTCMesh {
   private peerConnection: RTCPeerConnection | null = null;
   private dataChannel: RTCDataChannel | null = null;
@@ -17,26 +22,76 @@ export class WebRTCMesh {
   }
 
   private initPeerConnection() {
+    this.close();
     this.peerConnection = new RTCPeerConnection({
       iceServers: [], // No STUN/TURN for offline ad-hoc
     });
 
-    this.peerConnection.onicecandidate = (event) => {
-      // Note: In an ideal implementation, we wait for all candidates or
-      // bundle them. For this hackathon, we'll assume local candidates
-      // are part of the initial SDP.
-    };
-
     this.peerConnection.onconnectionstatechange = () => {
-      // console.log('[WebRTC] Connection state:', this.peerConnection?.connectionState);
       if (this.peerConnection?.connectionState === "connected") {
         this.onStatusChange("CONNECTED");
       } else if (
         this.peerConnection?.connectionState === "failed" ||
-        this.peerConnection?.connectionState === "closed"
+        this.peerConnection?.connectionState === "closed" ||
+        this.peerConnection?.connectionState === "disconnected"
       ) {
         this.onStatusChange("DISCONNECTED");
       }
+    };
+  }
+
+  private async waitForIceGatheringComplete(): Promise<void> {
+    const connection = this.peerConnection;
+    if (!connection || connection.iceGatheringState === "complete") return;
+
+    await new Promise<void>((resolve) => {
+      const timeout = window.setTimeout(() => {
+        connection.removeEventListener("icegatheringstatechange", handler);
+        resolve();
+      }, 3000);
+
+      const handler = () => {
+        if (connection.iceGatheringState === "complete") {
+          window.clearTimeout(timeout);
+          connection.removeEventListener("icegatheringstatechange", handler);
+          resolve();
+        }
+      };
+
+      connection.addEventListener("icegatheringstatechange", handler);
+    });
+  }
+
+  private encodeLocalDescription(): string {
+    const description = this.peerConnection?.localDescription;
+    if (!description?.sdp) {
+      throw new Error("Unable to generate local SDP.");
+    }
+
+    return btoa(
+      JSON.stringify({
+        type: description.type,
+        sdp: description.sdp,
+      } satisfies EncodedSessionDescription),
+    );
+  }
+
+  private decodeSessionDescription(payload: string): RTCSessionDescriptionInit {
+    let parsed: Partial<EncodedSessionDescription>;
+
+    try {
+      parsed = JSON.parse(atob(payload)) as Partial<EncodedSessionDescription>;
+    } catch {
+      throw new Error("Scanned QR payload is not a valid ResilNode SDP.");
+    }
+
+    if (!parsed.sdp || (parsed.type !== "offer" && parsed.type !== "answer")) {
+      throw new Error("Scanned QR payload is missing a valid SDP type.");
+    }
+
+    return {
+      type: parsed.type,
+      sdp: parsed.sdp,
     };
   }
 
@@ -57,12 +112,9 @@ export class WebRTCMesh {
 
     const offer = await this.peerConnection!.createOffer();
     await this.peerConnection!.setLocalDescription(offer);
+    await this.waitForIceGatheringComplete();
 
-    // Give a small delay for ICE candidates to settle in the local SDP
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    const sdp = this.peerConnection!.localDescription?.sdp;
-    return btoa(JSON.stringify({ type: "offer", sdp }));
+    return this.encodeLocalDescription();
   }
 
   /**
@@ -77,36 +129,44 @@ export class WebRTCMesh {
       this.setupDataChannel(this.dataChannel);
     };
 
-    const offerData = JSON.parse(atob(base64Offer));
+    const offerData = this.decodeSessionDescription(base64Offer);
+    if (offerData.type !== "offer") {
+      throw new Error("Expected an SDP offer QR payload.");
+    }
+
     await this.peerConnection!.setRemoteDescription(
       new RTCSessionDescription(offerData),
     );
 
     const answer = await this.peerConnection!.createAnswer();
     await this.peerConnection!.setLocalDescription(answer);
+    await this.waitForIceGatheringComplete();
 
-    // Give a small delay for ICE candidates
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    const sdp = this.peerConnection!.localDescription?.sdp;
-    return btoa(JSON.stringify({ type: "answer", sdp }));
+    return this.encodeLocalDescription();
   }
 
   /**
    * Finalizes the handshake with a scanned SDP Answer.
    */
   async finalizeHandshake(base64Answer: string) {
-    const answerData = JSON.parse(atob(base64Answer));
+    if (!this.peerConnection) {
+      throw new Error("No active WebRTC handshake to finalize.");
+    }
+
+    const answerData = this.decodeSessionDescription(base64Answer);
+    if (answerData.type !== "answer") {
+      throw new Error("Expected an SDP answer QR payload.");
+    }
+
     await this.peerConnection!.setRemoteDescription(
       new RTCSessionDescription(answerData),
     );
   }
 
   private setupDataChannel(channel: RTCDataChannel) {
-    channel.onopen = () => {
+    channel.onopen = async () => {
       this.onStatusChange("CONNECTED");
-      // console.log('[WebRTC] DataChannel open. Flushing queue...');
-      syncQueue.flushQueue(channel);
+      await syncQueue.flushQueue(channel);
     };
 
     channel.onmessage = (event) => {
@@ -125,13 +185,25 @@ export class WebRTCMesh {
 
   sendMessage(message: unknown) {
     if (this.dataChannel && this.dataChannel.readyState === "open") {
-      this.dataChannel.send(JSON.stringify(message));
-      return true;
+      try {
+        this.dataChannel.send(JSON.stringify(message));
+        return true;
+      } catch (error) {
+        console.error("[WebRTC] Send failed:", error);
+      }
     }
     return false;
   }
 
   isDisconnected() {
     return !this.dataChannel || this.dataChannel.readyState !== "open";
+  }
+
+  close() {
+    this.dataChannel?.close();
+    this.peerConnection?.close();
+    this.dataChannel = null;
+    this.peerConnection = null;
+    this.onStatusChange("DISCONNECTED");
   }
 }
